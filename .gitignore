@@ -17,6 +17,7 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.trae/
 *.swp
 
 # 测试/缓存

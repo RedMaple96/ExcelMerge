@@ -83,6 +83,39 @@ QStatusBar {
 }
 QStatusBar::item { border: none; }
 
+QFrame#BottomBar {
+    background-color: #f0f0f0;
+    border-top: 1px solid #d0d0d0;
+    border-bottom: 1px solid #d0d0d0;
+}
+QFrame#BottomBar QLabel {
+    color: #333333;
+    font-size: 12px;
+}
+QFrame#BottomBar QPushButton {
+    background-color: #e4e4e4;
+    color: #222222;
+    border: 1px solid #c0c0c0;
+    border-radius: 3px;
+    padding: 1px 8px;
+    font-size: 12px;
+    min-height: 16px;
+}
+QFrame#BottomBar QPushButton:hover {
+    background-color: #d8d8d8;
+    border-color: #909090;
+}
+QFrame#BottomBar QPushButton:checked {
+    background-color: #cde6f7;
+    border-color: #4a90d9;
+    color: #111111;
+}
+QFrame#BottomBar QPushButton:disabled {
+    background-color: #f0f0f0;
+    color: #a0a0a0;
+    border-color: #d0d0d0;
+}
+
 QComboBox {
     background-color: #ffffff;
     color: #222222;
@@ -194,6 +227,39 @@ QStatusBar {
     border-top: 1px solid #3a3a3a;
 }
 QStatusBar::item { border: none; }
+
+QFrame#BottomBar {
+    background-color: #2d2d2d;
+    border-top: 1px solid #3a3a3a;
+    border-bottom: 1px solid #3a3a3a;
+}
+QFrame#BottomBar QLabel {
+    color: #c0c0c0;
+    font-size: 12px;
+}
+QFrame#BottomBar QPushButton {
+    background-color: #3a3a3a;
+    color: #d4d4d4;
+    border: 1px solid #4a4a4a;
+    border-radius: 3px;
+    padding: 1px 8px;
+    font-size: 12px;
+    min-height: 16px;
+}
+QFrame#BottomBar QPushButton:hover {
+    background-color: #454545;
+    border-color: #6a6a6a;
+}
+QFrame#BottomBar QPushButton:checked {
+    background-color: #264f78;
+    border-color: #3a7bc8;
+    color: #ffffff;
+}
+QFrame#BottomBar QPushButton:disabled {
+    background-color: #2d2d2d;
+    color: #5a5a5a;
+    border-color: #3a3a3a;
+}
 
 QComboBox {
     background-color: #2d2d2d;

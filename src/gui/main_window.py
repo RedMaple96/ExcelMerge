@@ -42,10 +42,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from openpyxl.utils import get_column_letter
 
 from src.core.comparator import DiffResult, ExcelComparator
 from src.core.excel_loader import ExcelLoader, SheetData
 from src.core.merger import ExcelMerger
+from src.gui.bottom_bar import BottomBar
 from src.gui.column_settings_dialog import ColumnSettingsDialog
 from src.gui.themes import is_dark_mode
 from src.gui.workers import CompareWorker
@@ -87,6 +89,9 @@ class MainWindow(QMainWindow):
         self._ctx_row: int = -1  # 视觉行
         self._ctx_col: int = -1  # 视觉列
 
+        # ---- 底部导航栏相关状态 ----
+        self._sheet_diff_summary: dict = {}  # sheet_name -> has_diff (bool)
+
         # ---- 构建界面 ----
         self._init_ui()
         self._init_menubar()
@@ -100,12 +105,19 @@ class MainWindow(QMainWindow):
     # 中央界面（左右双面板）
     # ------------------------------------------------------------------ #
     def _init_ui(self) -> None:
-        """构建中央控件：左右两个面板，各含标题区/表格/统计区。"""
+        """构建中央控件：左右两个面板 + 底部导航栏。"""
         central = QWidget(self)
         self.setCentralWidget(central)
         central.setAcceptDrops(True)  # 启用窗口级拖拽接收
-        outer = QHBoxLayout(central)
-        outer.setContentsMargins(4, 4, 4, 4)
+
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(4, 4, 4, 0)
+        outer.setSpacing(0)
+
+        # ---- 上方：左右双面板 ----
+        panels = QHBoxLayout()
+        panels.setContentsMargins(0, 0, 0, 0)
+        panels.setSpacing(4)
 
         # 左侧面板
         (
@@ -113,7 +125,7 @@ class MainWindow(QMainWindow):
             self.left_sheet_combo,
             self.left_table,
             self.left_stat_label,
-        ) = self._make_panel(outer, "左侧")
+        ) = self._make_panel(panels, "左侧")
 
         # 右侧面板
         (
@@ -121,7 +133,13 @@ class MainWindow(QMainWindow):
             self.right_sheet_combo,
             self.right_table,
             self.right_stat_label,
-        ) = self._make_panel(outer, "右侧")
+        ) = self._make_panel(panels, "右侧")
+
+        outer.addLayout(panels, 1)
+
+        # ---- 下方：底部导航栏 ----
+        self.bottom_bar = BottomBar(self)
+        outer.addWidget(self.bottom_bar)
 
         self._configure_table(self.left_table)
         self._configure_table(self.right_table)
@@ -407,7 +425,7 @@ class MainWindow(QMainWindow):
     # 信号连接
     # ------------------------------------------------------------------ #
     def _init_connections(self) -> None:
-        """连接 Sheet 下拉、同步滚动与右键菜单。"""
+        """连接 Sheet 下拉、同步滚动、右键菜单、底部导航栏与单元格追踪。"""
         self.left_sheet_combo.currentIndexChanged.connect(
             lambda _: self._on_sheet_changed("left")
         )
@@ -433,6 +451,19 @@ class MainWindow(QMainWindow):
         for table in (self.left_table, self.right_table):
             table.setContextMenuPolicy(Qt.CustomContextMenu)
             table.customContextMenuRequested.connect(self.on_context_menu)
+
+        # 单元格坐标追踪
+        self.left_table.currentItemChanged.connect(
+            lambda cur, prev: self._on_current_cell_changed(self.left_table, cur)
+        )
+        self.right_table.currentItemChanged.connect(
+            lambda cur, prev: self._on_current_cell_changed(self.right_table, cur)
+        )
+
+        # 底部导航栏信号
+        self.bottom_bar.sheet_activated.connect(self._on_tab_sheet_activated)
+        self.bottom_bar.sheet_renamed.connect(self._on_tab_sheet_renamed)
+        self.bottom_bar.sheet_close_requested.connect(self._on_tab_sheet_closed)
 
     def _init_shortcuts(self) -> None:
         """注册无菜单项的额外快捷键（Task 11）。"""
@@ -543,6 +574,11 @@ class MainWindow(QMainWindow):
 
         self._update_file_label(side)
         self._on_sheet_changed(side)
+
+        # 两侧均加载后，更新底部导航栏标签与红点
+        if self.left_wb and self.right_wb:
+            self._refresh_bottom_bar_sheets()
+
         self.update_status(f"已加载 {side} 侧: {os.path.basename(path)}")
 
     def _update_file_label(self, side: str) -> None:
@@ -638,19 +674,37 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def _on_sheet_changed(self, side: str) -> None:
         """下拉切换 Sheet：提取 SheetData -> 刷新表格 -> 触发比较。"""
-        wb = self.left_wb if side == "left" else self.right_wb
         combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
-        if wb is None or combo.count() == 0:
+        if combo.count() == 0:
             return
         name = combo.currentText()
         if not name:
             return
+        if not self._load_sheet_data(side, name):
+            return
+
+        # 切换 Sheet 时清除旧的差异结果，避免显示错位的对齐行
+        self.diff_result = None
+        self._refresh_tables()
+        self._run_compare()
+
+        # 同步底部导航栏激活标签
+        self.bottom_bar.set_active(name)
+
+    def _load_sheet_data(self, side: str, name: str) -> bool:
+        """加载指定侧指定 Sheet 的数据到内存。
+
+        返回 True 表示成功；失败时弹警告并返回 False。
+        """
+        wb = self.left_wb if side == "left" else self.right_wb
+        if wb is None:
+            return False
         try:
             ws = ExcelLoader.get_worksheet(wb, name)
             sheet_data = ExcelLoader.extract_sheet_data(ws)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Sheet 读取失败", f"无法读取工作表 {name}:\n{exc}")
-            return
+            return False
 
         if side == "left":
             self.left_sheet_data = sheet_data
@@ -658,11 +712,29 @@ class MainWindow(QMainWindow):
         else:
             self.right_sheet_data = sheet_data
             self.right_sheet_name = name
+        return True
 
-        # 切换 Sheet 时清除旧的差异结果，避免显示错位的对齐行
+    def _switch_to_sheet(self, name: str) -> None:
+        """从底部标签栏切换两侧到同一 Sheet（屏蔽下拉信号避免重复比较）。"""
+        self.left_sheet_combo.blockSignals(True)
+        self.right_sheet_combo.blockSignals(True)
+        try:
+            li = self.left_sheet_combo.findText(name)
+            if li >= 0 and self.left_wb is not None:
+                self.left_sheet_combo.setCurrentIndex(li)
+                self._load_sheet_data("left", name)
+            ri = self.right_sheet_combo.findText(name)
+            if ri >= 0 and self.right_wb is not None:
+                self.right_sheet_combo.setCurrentIndex(ri)
+                self._load_sheet_data("right", name)
+        finally:
+            self.left_sheet_combo.blockSignals(False)
+            self.right_sheet_combo.blockSignals(False)
+
         self.diff_result = None
         self._refresh_tables()
         self._run_compare()
+        self.bottom_bar.set_active(name)
 
     def _refresh_tables(self) -> None:
         """刷新左右表格内容。
@@ -699,37 +771,42 @@ class MainWindow(QMainWindow):
 
         row_indices 中 None 表示该显示行为空（对应侧无此行）。
         """
-        table.setRowCount(0)  # 清空旧内容与旧格式
-        table.setColumnCount(max_col)
+        # 屏蔽信号，避免程序化填充触发 currentItemChanged 等回调
+        table.blockSignals(True)
+        try:
+            table.setRowCount(0)  # 清空旧内容与旧格式
+            table.setColumnCount(max_col)
 
-        # 列头
-        if sheet_data and sheet_data.header_labels:
-            labels = list(sheet_data.header_labels)
-            while len(labels) < max_col:
-                labels.append("")
-            table.setHorizontalHeaderLabels(labels[:max_col])
-        else:
-            table.setHorizontalHeaderLabels([""] * max_col)
+            # 列头
+            if sheet_data and sheet_data.header_labels:
+                labels = list(sheet_data.header_labels)
+                while len(labels) < max_col:
+                    labels.append("")
+                table.setHorizontalHeaderLabels(labels[:max_col])
+            else:
+                table.setHorizontalHeaderLabels([""] * max_col)
 
-        table.setRowCount(len(row_indices))
-        # 行号标签
-        table.setVerticalHeaderLabels(
-            [str(i + 1) for i in range(len(row_indices))]
-        )
-
-        for r, src_idx in enumerate(row_indices):
-            if src_idx is None or sheet_data is None:
-                continue
-            values = (
-                sheet_data.values[src_idx]
-                if src_idx < len(sheet_data.values)
-                else []
+            table.setRowCount(len(row_indices))
+            # 行号标签
+            table.setVerticalHeaderLabels(
+                [str(i + 1) for i in range(len(row_indices))]
             )
-            for c in range(max_col):
-                text = values[c] if c < len(values) else ""
-                table.setItem(r, c, QTableWidgetItem(text))
 
-        table.verticalHeader().setVisible(self.show_row_numbers)
+            for r, src_idx in enumerate(row_indices):
+                if src_idx is None or sheet_data is None:
+                    continue
+                values = (
+                    sheet_data.values[src_idx]
+                    if src_idx < len(sheet_data.values)
+                    else []
+                )
+                for c in range(max_col):
+                    text = values[c] if c < len(values) else ""
+                    table.setItem(r, c, QTableWidgetItem(text))
+
+            table.verticalHeader().setVisible(self.show_row_numbers)
+        finally:
+            table.blockSignals(False)
 
     def _run_compare(self) -> None:
         """两侧数据齐全时启动后台比较线程，避免阻塞 UI。
@@ -786,6 +863,8 @@ class MainWindow(QMainWindow):
         self._refresh_tables()
         self._update_stat_labels()
         self._render_diffs()
+        # 更新当前 Sheet 的差异红点状态
+        self._update_current_sheet_diff_status(result)
 
     def _on_compare_progress(self, cur: int, total: int) -> None:
         """更新状态栏进度条。"""
@@ -1091,6 +1170,14 @@ class MainWindow(QMainWindow):
         self._update_file_label("left")
         self._update_file_label("right")
 
+        # 交换后差异摘要不变（只是左右对调），刷新红点
+        if self.left_wb and self.right_wb:
+            diff_set = {n for n, has in self._sheet_diff_summary.items() if has}
+            self.bottom_bar.update_diff_status(diff_set)
+            current = self.left_sheet_name or self.right_sheet_name
+            if current:
+                self.bottom_bar.set_active(current)
+
         self._refresh_tables()
         self._run_compare()
         self.update_status("已交换左右两侧")
@@ -1308,6 +1395,11 @@ class MainWindow(QMainWindow):
         self._dirty = True
         self._backup_done = False
         self.backup_label.setText("备份: 待保存")
+        # 合并后重新计算各 sheet 差异红点（可能当前 sheet 差异已消除）
+        if self.left_wb and self.right_wb:
+            self._compute_sheet_diff_summary()
+            diff_set = {n for n, has in self._sheet_diff_summary.items() if has}
+            self.bottom_bar.update_diff_status(diff_set)
 
     def on_context_menu(self, pos) -> None:
         """表格右键菜单：根据触发表格决定“复制到对侧”的文案与方向。
@@ -1511,6 +1603,152 @@ class MainWindow(QMainWindow):
                 target.horizontalScrollBar().setValue(value)
         finally:
             self._sync_scroll_blocked = False
+
+    # ------------------------------------------------------------------ #
+    # 底部导航栏：坐标追踪 / 标签交互 / 差异红点
+    # ------------------------------------------------------------------ #
+    def _on_current_cell_changed(self, table: QTableWidget, item) -> None:
+        """当前单元格变化时，更新底部导航栏的坐标显示。"""
+        if item is None:
+            self.bottom_bar.set_coord("-")
+            return
+        row = item.row()
+        col = item.column()
+        if row < 0 or col < 0:
+            self.bottom_bar.set_coord("-")
+            return
+        # Excel 风格坐标：列字母 + 1-based 行号
+        col_letter = get_column_letter(col + 1)
+        self.bottom_bar.set_coord(f"{col_letter}{row + 1}")
+
+    def _on_tab_sheet_activated(self, name: str) -> None:
+        """底部标签点击 → 切换两侧到同一 Sheet。"""
+        self._switch_to_sheet(name)
+
+    def _on_tab_sheet_renamed(self, old_name: str, new_name: str) -> None:
+        """底部标签双击重命名 → 同步到两侧 workbook 与下拉。"""
+        renamed_left = False
+        renamed_right = False
+
+        # 左侧 workbook
+        if self.left_wb is not None and old_name in self.left_wb.sheetnames:
+            try:
+                self.left_wb[old_name].title = new_name
+                renamed_left = True
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "重命名失败", f"左侧重命名失败:\n{exc}")
+
+        # 右侧 workbook
+        if self.right_wb is not None and old_name in self.right_wb.sheetnames:
+            try:
+                self.right_wb[old_name].title = new_name
+                renamed_right = True
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "重命名失败", f"右侧重命名失败:\n{exc}")
+
+        # 更新下拉
+        for combo in (self.left_sheet_combo, self.right_sheet_combo):
+            idx = combo.findText(old_name)
+            if idx >= 0:
+                combo.blockSignals(True)
+                combo.setItemText(idx, new_name)
+                combo.blockSignals(False)
+
+        # 更新当前 sheet 名状态
+        if self.left_sheet_name == old_name and renamed_left:
+            self.left_sheet_name = new_name
+        if self.right_sheet_name == old_name and renamed_right:
+            self.right_sheet_name = new_name
+
+        # 更新差异摘要缓存中的键
+        if old_name in self._sheet_diff_summary:
+            self._sheet_diff_summary[new_name] = self._sheet_diff_summary.pop(old_name)
+
+        # 标记脏状态（重命名未保存到文件）
+        self._dirty = True
+        self._backup_done = False
+        self.backup_label.setText("备份: 待保存")
+        self.update_status(f"已重命名: {old_name} → {new_name}（仅本地）")
+
+    def _on_tab_sheet_closed(self, name: str, close_others: bool) -> None:
+        """底部标签右键关闭：从标签栏移除（不影响实际 workbook）。"""
+        if close_others:
+            for n in list(self.bottom_bar.get_sheet_names()):
+                if n != name:
+                    self.bottom_bar.remove_sheet(n)
+            self.update_status(f"已关闭其他标签（保留 {name}）")
+        else:
+            self.bottom_bar.remove_sheet(name)
+            self.update_status(f"已关闭标签: {name}")
+
+    # ------------------------------------------------------------------ #
+    # 全工作簿逐 Sheet 差异红点
+    # ------------------------------------------------------------------ #
+    def _refresh_bottom_bar_sheets(self) -> None:
+        """两侧均加载后，重建底部标签栏并计算各 Sheet 差异状态。"""
+        if not (self.left_wb and self.right_wb):
+            return
+
+        left_names = ExcelLoader.get_sheet_names(self.left_wb)
+        right_names = ExcelLoader.get_sheet_names(self.right_wb)
+
+        # 合并去重，保持左侧顺序优先，右侧独有的追加到末尾
+        all_names: List[str] = list(left_names)
+        for n in right_names:
+            if n not in all_names:
+                all_names.append(n)
+
+        # 计算各 sheet 差异状态
+        self._compute_sheet_diff_summary()
+
+        diff_set = {n for n, has in self._sheet_diff_summary.items() if has}
+        self.bottom_bar.set_sheets(all_names, diff_set)
+
+        # 高亮当前 sheet
+        current = self.left_sheet_name or self.right_sheet_name
+        if current:
+            self.bottom_bar.set_active(current)
+
+    def _compute_sheet_diff_summary(self) -> None:
+        """遍历所有 sheet，计算是否有差异（用于红点标记）。"""
+        self._sheet_diff_summary = {}
+        if not (self.left_wb and self.right_wb):
+            return
+
+        left_names = set(ExcelLoader.get_sheet_names(self.left_wb))
+        right_names = set(ExcelLoader.get_sheet_names(self.right_wb))
+
+        for name in left_names | right_names:
+            if name not in left_names or name not in right_names:
+                # 仅一侧存在 → 有差异
+                self._sheet_diff_summary[name] = True
+                continue
+            try:
+                lws = ExcelLoader.get_worksheet(self.left_wb, name)
+                rws = ExcelLoader.get_worksheet(self.right_wb, name)
+                ldata = ExcelLoader.extract_sheet_data(lws)
+                rdata = ExcelLoader.extract_sheet_data(rws)
+                diff = ExcelComparator.compare_sheets(
+                    ldata, rdata, self.key_cols, self.ignore_cols
+                )
+                s = diff.stats
+                self._sheet_diff_summary[name] = (
+                    s["different"] + s["left_only"] + s["right_only"] > 0
+                )
+            except Exception:  # noqa: BLE001
+                self._sheet_diff_summary[name] = True
+
+    def _update_current_sheet_diff_status(self, result: DiffResult) -> None:
+        """比较完成后，更新当前 sheet 的红点状态。"""
+        current = self.left_sheet_name or self.right_sheet_name
+        if not current:
+            return
+        s = result.stats
+        has_diff = s["different"] + s["left_only"] + s["right_only"] > 0
+        self._sheet_diff_summary[current] = has_diff
+        self.bottom_bar.update_diff_status(
+            {n for n, has in self._sheet_diff_summary.items() if has}
+        )
 
     # ------------------------------------------------------------------ #
     # 工具方法

@@ -654,9 +654,15 @@ class MainWindow(QMainWindow):
             self.load_file("right", paths[1])
         else:
             path = paths[0]
-            if self.left_table.underMouse():
+            # underMouse() 在拖放过程中不会更新，改用全局光标位置判断落点
+            cursor_pos = QCursor.pos()
+            if self.left_table.rect().contains(
+                self.left_table.mapFromGlobal(cursor_pos)
+            ):
                 side = "left"
-            elif self.right_table.underMouse():
+            elif self.right_table.rect().contains(
+                self.right_table.mapFromGlobal(cursor_pos)
+            ):
                 side = "right"
             elif self.left_path is None:
                 side = "left"

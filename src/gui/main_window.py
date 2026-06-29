@@ -50,6 +50,7 @@ from src.core.excel_loader import ExcelLoader, SheetData
 from src.core.merger import ExcelMerger
 from src.gui.bottom_bar import BottomBar
 from src.gui.column_settings_dialog import ColumnSettingsDialog
+from src.gui.diff_birds_eye import DiffBirdsEyeView
 from src.gui.themes import is_dark_mode
 from src.gui.workers import CompareWorker
 
@@ -133,6 +134,10 @@ class MainWindow(QMainWindow):
             self.right_sheet_combo,
             self.right_table,
         ) = self._make_panel(panels, "右侧")
+
+        # 最左侧：全局差异缩略图导航条（极窄纵列，红色刻度标记差异行）
+        self.diff_birds_eye = DiffBirdsEyeView(self.left_table)
+        panels.insertWidget(0, self.diff_birds_eye)
 
         outer.addLayout(panels, 1)
 
@@ -293,6 +298,12 @@ class MainWindow(QMainWindow):
         self.action_resize_columns = QAction("调整列宽", self)
         self.action_resize_columns.triggered.connect(self.resize_columns)
         m_view.addAction(self.action_resize_columns)
+
+        self.action_show_birds_eye = QAction("差异缩略图", self)
+        self.action_show_birds_eye.setCheckable(True)
+        self.action_show_birds_eye.setChecked(True)
+        self.action_show_birds_eye.toggled.connect(self._on_toggle_birds_eye)
+        m_view.addAction(self.action_show_birds_eye)
 
         m_view.addSeparator()
 
@@ -713,6 +724,7 @@ class MainWindow(QMainWindow):
 
         # 切换 Sheet 时清除旧的差异结果，避免显示错位的对齐行
         self.diff_result = None
+        self._update_birds_eye()
         self._refresh_tables()
         self._run_compare()
 
@@ -760,6 +772,7 @@ class MainWindow(QMainWindow):
             self.right_sheet_combo.blockSignals(False)
 
         self.diff_result = None
+        self._update_birds_eye()
         self._refresh_tables()
         self._run_compare()
         self.bottom_bar.set_active(name)
@@ -993,6 +1006,16 @@ class MainWindow(QMainWindow):
             elif status == "right_only":
                 self._paint_row(self.right_table, i, colors["only_row"])
             # same: 不着色
+
+        # 同步全局差异缩略图标记
+        self._update_birds_eye()
+
+    def _update_birds_eye(self) -> None:
+        """根据当前 diff_result 刷新全局差异缩略图的差异行标记。"""
+        if self.diff_result:
+            self.diff_birds_eye.set_diff_rows(self.diff_result.diff_row_indices)
+        else:
+            self.diff_birds_eye.clear()
 
     def _hide_row_pair(self, row: int) -> None:
         """同时隐藏两侧表格的指定行。"""
@@ -1410,6 +1433,7 @@ class MainWindow(QMainWindow):
             )
         # 清除旧差异结果，避免按过期对齐渲染
         self.diff_result = None
+        self._update_birds_eye()
         self._refresh_tables()
         self._run_compare()
         self._dirty = True
@@ -1704,6 +1728,10 @@ class MainWindow(QMainWindow):
         self.show_row_numbers = checked
         self.left_table.verticalHeader().setVisible(checked)
         self.right_table.verticalHeader().setVisible(checked)
+
+    def _on_toggle_birds_eye(self, checked: bool) -> None:
+        """显示/隐藏全局差异缩略图导航条。"""
+        self.diff_birds_eye.setVisible(checked)
 
     def _on_view_filter_changed(self) -> None:
         """显示差异/相同/仅左/仅右 过滤变化 —— 触发重渲染（Task 6 实装过滤）。"""

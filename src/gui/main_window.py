@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
+    QSizePolicy,
     QStyle,
     QTableWidget,
     QTableWidgetItem,
@@ -387,6 +388,33 @@ class MainWindow(QMainWindow):
         self.tb_merge = self.toolbar.addAction(
             icon(QStyle.SP_DialogApplyButton), "合并", self.merge
         )
+
+        # ---- 过滤器：全部 / 差异 / 相同（核心切换） ----
+        self.toolbar.addSeparator()
+        filter_label = QLabel("过滤器:")
+        self.toolbar.addWidget(filter_label)
+        self.filter_combo = QComboBox(self)
+        self.filter_combo.addItem("全部")
+        self.filter_combo.addItem("差异")
+        self.filter_combo.addItem("相同")
+        self.filter_combo.setToolTip(
+            "全部：显示所有行\n"
+            "差异：只显示有差异的行（隐藏完全相同的行）\n"
+            "相同：只显示完全相同的行"
+        )
+        # 显式设置最小宽度，避免 QToolBar 压缩导致文字截断
+        # 中文字符约 13-14px/字，"全部"2字 + 下拉箭头 + 边距，给足 90px
+        self.filter_combo.setMinimumWidth(90)
+        self.filter_combo.setSizePolicy(
+            QSizePolicy.Minimum, QSizePolicy.Fixed
+        )
+        # 弹出下拉列表宽度与组合框一致
+        self.filter_combo.view().setMinimumWidth(90)
+        self.filter_combo.setCurrentIndex(0)
+        self.filter_combo.currentIndexChanged.connect(
+            self._on_filter_preset_changed
+        )
+        self.toolbar.addWidget(self.filter_combo)
 
     # ------------------------------------------------------------------ #
     # 状态栏
@@ -1679,7 +1707,55 @@ class MainWindow(QMainWindow):
 
     def _on_view_filter_changed(self) -> None:
         """显示差异/相同/仅左/仅右 过滤变化 —— 触发重渲染（Task 6 实装过滤）。"""
+        self._sync_filter_combo_from_checks()
         self._render_diffs()
+
+    def _on_filter_preset_changed(self, idx: int) -> None:
+        """工具栏过滤器预设切换：根据预设同步 4 个细粒度过滤开关。
+
+        - 全部(0)：4 个开关全开
+        - 差异(1)：显示差异/仅左/仅右，隐藏相同
+        - 相同(2)：仅显示相同，隐藏差异/仅左/仅右
+        """
+        if idx == 0:  # 全部
+            show_diff, show_same, show_left, show_right = True, True, True, True
+        elif idx == 1:  # 差异
+            show_diff, show_same, show_left, show_right = True, False, True, True
+        else:  # 相同
+            show_diff, show_same, show_left, show_right = False, True, False, False
+
+        for act, val in (
+            (self.action_show_diff, show_diff),
+            (self.action_show_same, show_same),
+            (self.action_show_left_only, show_left),
+            (self.action_show_right_only, show_right),
+        ):
+            act.blockSignals(True)
+            act.setChecked(val)
+            act.blockSignals(False)
+        self._render_diffs()
+
+    def _sync_filter_combo_from_checks(self) -> None:
+        """根据 4 个细粒度过滤开关的实际状态，反向同步工具栏过滤器预设。
+
+        状态匹配某预设时同步显示；不匹配时保留当前选择不动，避免误导。
+        """
+        d = self.action_show_diff.isChecked()
+        s = self.action_show_same.isChecked()
+        l = self.action_show_left_only.isChecked()
+        r = self.action_show_right_only.isChecked()
+
+        if d and s and l and r:
+            idx = 0  # 全部
+        elif d and not s and l and r:
+            idx = 1  # 差异
+        elif not d and s and not l and not r:
+            idx = 2  # 相同
+        else:
+            return  # 自定义组合，不更新预设
+        self.filter_combo.blockSignals(True)
+        self.filter_combo.setCurrentIndex(idx)
+        self.filter_combo.blockSignals(False)
 
     def resize_columns(self) -> None:
         """按内容自动调整列宽。"""

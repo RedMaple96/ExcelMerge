@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -43,7 +45,6 @@ class ColumnSettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("列设置")
-        self.setMinimumWidth(420)
 
         current_key_cols = list(current_key_cols) if current_key_cols else []
         current_ignore_cols = (
@@ -95,6 +96,16 @@ class ColumnSettingsDialog(QDialog):
         else:
             grid_cols = 4
 
+        # 预计算最长复选框文本宽度，用于决定对话框最小宽度
+        fm = QFontMetrics(self.font())
+        max_cb_text = ""
+        for i in range(n):
+            text = f"{header_labels[i]}  (第 {i + 1} 列)"
+            if len(text) > len(max_cb_text):
+                max_cb_text = text
+        # 复选框文本 + 指示框 + 留白
+        cb_text_w = fm.horizontalAdvance(max_cb_text) + 28
+
         # ---- 内容容器：放进滚动区 ----
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -105,11 +116,15 @@ class ColumnSettingsDialog(QDialog):
         key_group = QGroupBox("Key 列（用于行匹配）")
         key_grid = QGridLayout(key_group)
         key_grid.setSpacing(2)
-        key_grid.setColumnStretch(grid_cols, 1)
+        # 所有复选框列等量伸缩，避免长标签被截断
+        for c in range(grid_cols):
+            key_grid.setColumnStretch(c, 1)
         for i in range(n):
             label = header_labels[i]
             cb = QCheckBox(f"{label}  (第 {i + 1} 列)")
             cb.setChecked(i in key_set)
+            cb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            cb.setMinimumWidth(cb_text_w)
             # 同步：勾选 Key 时取消该列的 Ignore
             cb.toggled.connect(
                 lambda checked, idx=i: self._on_key_toggled(idx, checked)
@@ -122,11 +137,14 @@ class ColumnSettingsDialog(QDialog):
         ignore_group = QGroupBox("忽略列（Unimportant Columns）")
         ignore_grid = QGridLayout(ignore_group)
         ignore_grid.setSpacing(2)
-        ignore_grid.setColumnStretch(grid_cols, 1)
+        for c in range(grid_cols):
+            ignore_grid.setColumnStretch(c, 1)
         for i in range(n):
             label = header_labels[i]
             cb = QCheckBox(f"{label}  (第 {i + 1} 列)")
             cb.setChecked(i in ignore_set)
+            cb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            cb.setMinimumWidth(cb_text_w)
             # 同步：勾选 Ignore 时取消该列的 Key
             cb.toggled.connect(
                 lambda checked, idx=i: self._on_ignore_toggled(idx, checked)
@@ -144,8 +162,15 @@ class ColumnSettingsDialog(QDialog):
         # 限制最大高度，避免超出屏幕
         screen = QApplication.primaryScreen()
         if screen is not None:
-            max_h = int(screen.availableGeometry().height() * 0.8)
+            avail = screen.availableGeometry()
+            max_h = int(avail.height() * 0.8)
             self.setMaximumHeight(max_h)
+
+            # 根据网格列数与最长复选框宽度计算最小宽度，
+            # 确保复选框文本完整显示；同时不超过屏幕宽度 90%
+            min_w = grid_cols * cb_text_w + 80  # 留出边距与滚动条
+            min_w = min(min_w, int(avail.width() * 0.9))
+            self.setMinimumWidth(max(420, min_w))
 
         # ---- 按钮盒 ----
         buttons = QDialogButtonBox(

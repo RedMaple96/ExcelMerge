@@ -124,7 +124,6 @@ class MainWindow(QMainWindow):
             self.left_file_label,
             self.left_sheet_combo,
             self.left_table,
-            self.left_stat_label,
         ) = self._make_panel(panels, "左侧")
 
         # 右侧面板
@@ -132,7 +131,6 @@ class MainWindow(QMainWindow):
             self.right_file_label,
             self.right_sheet_combo,
             self.right_table,
-            self.right_stat_label,
         ) = self._make_panel(panels, "右侧")
 
         outer.addLayout(panels, 1)
@@ -145,7 +143,7 @@ class MainWindow(QMainWindow):
         self._configure_table(self.right_table)
 
     def _make_panel(self, parent_layout: QHBoxLayout, title: str):
-        """创建单个面板，返回 (file_label, sheet_combo, table, stat_label)。"""
+        """创建单个面板，返回 (file_label, sheet_combo, table)。"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(2, 2, 2, 2)
@@ -170,13 +168,8 @@ class MainWindow(QMainWindow):
         table = QTableWidget()
         layout.addWidget(table, 1)
 
-        # 统计区
-        stat_label = QLabel("差异: 0 | 相同: 0 | 仅左: 0 仅右: 0")
-        stat_label.setContentsMargins(6, 0, 6, 0)
-        layout.addWidget(stat_label)
-
         parent_layout.addWidget(panel, 1)
-        return file_label, sheet_combo, table, stat_label
+        return file_label, sheet_combo, table
 
     def _configure_table(self, table: QTableWidget) -> None:
         """配置 QTableWidget 的通用属性。"""
@@ -994,21 +987,13 @@ class MainWindow(QMainWindow):
             item.setBackground(QBrush(color))
 
     def _update_stat_labels(self) -> None:
-        """更新底部统计标签与状态栏的行/差异数。"""
+        """更新状态栏的行/差异数。"""
         if self.diff_result:
             s = self.diff_result.stats
-            text = (
-                f"差异: {s['different']} | 相同: {s['same']} | "
-                f"仅左: {s['left_only']} 仅右: {s['right_only']}"
-            )
-            self.left_stat_label.setText(text)
-            self.right_stat_label.setText(text)
             self.diff_label.setText(
                 f"差异: {s['different'] + s['left_only'] + s['right_only']}"
             )
         else:
-            self.left_stat_label.setText("差异: 0 | 相同: 0 | 仅左: 0 仅右: 0")
-            self.right_stat_label.setText("差异: 0 | 相同: 0 | 仅左: 0 仅右: 0")
             self.diff_label.setText("差异: 0")
 
         n_left = len(self.left_sheet_data.values) if self.left_sheet_data else 0

@@ -173,8 +173,9 @@ class MainWindow(QMainWindow):
 
     def _configure_table(self, table: QTableWidget) -> None:
         """配置 QTableWidget 的通用属性。"""
-        table.setSelectionMode(QTableWidget.SingleSelection)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
+        # ExtendedSelection + SelectItems：支持 Ctrl/Shift 多选单元格，便于批量复制
+        table.setSelectionMode(QTableWidget.ExtendedSelection)
+        table.setSelectionBehavior(QTableWidget.SelectItems)
         table.setAlternatingRowColors(False)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         # 行号：使用 verticalHeader，可由 show_row_numbers 切换显隐
@@ -1416,20 +1417,24 @@ class MainWindow(QMainWindow):
         global_pos = table.viewport().mapToGlobal(pos)
         menu.exec(global_pos)
 
-    def _ctx_resolve_pair(self):
-        """根据 _ctx_table/_ctx_row 解析当前对齐行，返回 (source, src_idx, target, tgt_idx, side)。
+    def _resolve_pair_for_row(self, row: int, quiet: bool = False):
+        """根据 _ctx_table 与指定行解析对齐行，返回 (source, src_idx, target, tgt_idx, side)。
 
-        若该行仅一侧存在或无差异结果，返回 None 并更新状态。
+        若该行仅一侧存在或无差异结果，返回 None。
+        quiet=True 时不更新状态栏（用于批量场景静默跳过）。
         """
-        if not self.diff_result or self._ctx_row < 0:
-            self.update_status("无有效行可操作")
+        if not self.diff_result or row < 0:
+            if not quiet:
+                self.update_status("无有效行可操作")
             return None
-        if self._ctx_row >= len(self.diff_result.aligned_rows):
-            self.update_status("行索引越界")
+        if row >= len(self.diff_result.aligned_rows):
+            if not quiet:
+                self.update_status("行索引越界")
             return None
-        pair = self.diff_result.aligned_rows[self._ctx_row]
+        pair = self.diff_result.aligned_rows[row]
         if pair.left_row is None or pair.right_row is None:
-            self.update_status("该行仅一侧存在，无法对应复制")
+            if not quiet:
+                self.update_status("该行仅一侧存在，无法对应复制")
             return None
         is_left = self._ctx_table is self.left_table
         if is_left:
@@ -1448,54 +1453,132 @@ class MainWindow(QMainWindow):
             "left",
         )
 
+    def _ctx_resolve_pair(self):
+        """根据 _ctx_table/_ctx_row 解析当前对齐行（单行场景保留的旧接口）。"""
+        return self._resolve_pair_for_row(self._ctx_row)
+
     def _ctx_copy_row(self) -> None:
-        """右键：把当前行整行（值与样式）复制到对侧对应行。"""
-        resolved = self._ctx_resolve_pair()
-        if resolved is None:
+        """右键：把选中行整行（值与样式）复制到对侧对应行（支持多选）。"""
+        if self._ctx_table is None:
             return
-        source, src_idx, target, tgt_idx, side = resolved
+        if not self.diff_result:
+            self.update_status("无差异结果，无法复制")
+            return
+
+        # 收集选中行（去重 + 排序），无选中时退化为当前行
+        rows = {it.row() for it in self._ctx_table.selectedItems()}
+        if not rows and self._ctx_row >= 0:
+            rows = {self._ctx_row}
+        if not rows:
+            self.update_status("无有效行可复制")
+            return
+
         max_col = self.diff_result.max_col
-        try:
-            ExcelMerger.copy_row_to_other(source, src_idx, target, tgt_idx, max_col)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "复制失败", f"复制行失败:\n{exc}")
+
+        # 先解析所有可复制行（_post_merge 会清空 diff_result，必须提前收集）
+        tasks = []
+        skipped = 0
+        for row in sorted(rows):
+            resolved = self._resolve_pair_for_row(row, quiet=True)
+            if resolved is None:
+                skipped += 1
+                continue
+            tasks.append(resolved)
+
+        if not tasks:
+            self.update_status("选中行均仅一侧存在，无法对应复制")
             return
+
+        side = tasks[0][4]
+        failures = 0
+        last_exc: Optional[Exception] = None
+        for source, src_idx, target, tgt_idx, _ in tasks:
+            try:
+                ExcelMerger.copy_row_to_other(source, src_idx, target, tgt_idx, max_col)
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                last_exc = exc
+
+        if failures:
+            QMessageBox.critical(
+                self, "复制失败", f"复制行失败 ({failures}/{len(tasks)}):\n{last_exc}"
+            )
+            return
+
         self._post_merge(side)
-        self.update_status("已复制行到对侧")
+        msg = f"已复制 {len(tasks)} 行到对侧"
+        if skipped:
+            msg += f"（跳过 {skipped} 行仅一侧存在）"
+        self.update_status(msg)
 
     def _ctx_copy_single_cell(self) -> None:
-        """右键：把当前单元格（值与样式）复制到对侧对应位置。"""
-        if self._ctx_col < 0:
+        """右键：把选中单元格（值与样式）复制到对侧对应位置（支持多选）。"""
+        if self._ctx_table is None:
+            return
+        if not self.diff_result:
+            self.update_status("无差异结果，无法复制")
+            return
+
+        # 收集选中 (row, col)（去重），无选中时退化为当前单元格
+        cells = {(it.row(), it.column()) for it in self._ctx_table.selectedItems()}
+        if not cells and self._ctx_row >= 0 and self._ctx_col >= 0:
+            cells = {(self._ctx_row, self._ctx_col)}
+        if not cells:
             self.update_status("无有效单元格可复制")
             return
-        resolved = self._ctx_resolve_pair()
-        if resolved is None:
+
+        # 按行解析一次，避免重复 resolve
+        rows_needed = {r for r, _ in cells}
+        row_resolved: dict = {}
+        skipped_rows = 0
+        for row in rows_needed:
+            res = self._resolve_pair_for_row(row, quiet=True)
+            if res is None:
+                skipped_rows += 1
+            else:
+                row_resolved[row] = res
+
+        if not row_resolved:
+            self.update_status("选中单元格所在行均仅一侧存在，无法对应复制")
             return
-        source, src_idx, target, tgt_idx, side = resolved
-        try:
-            ExcelMerger.copy_single_cell(
-                source, src_idx, self._ctx_col, target, tgt_idx
+
+        side = next(iter(row_resolved.values()))[4]
+        failures = 0
+        success = 0
+        last_exc: Optional[Exception] = None
+        for (row, col) in cells:
+            resolved = row_resolved.get(row)
+            if resolved is None:
+                continue
+            source, src_idx, target, tgt_idx, _ = resolved
+            try:
+                ExcelMerger.copy_single_cell(source, src_idx, col, target, tgt_idx)
+                success += 1
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                last_exc = exc
+
+        if failures:
+            QMessageBox.critical(
+                self, "复制失败", f"复制单元格失败 ({failures}):\n{last_exc}"
             )
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "复制失败", f"复制单元格失败:\n{exc}")
             return
+
         self._post_merge(side)
-        self.update_status("已复制单元格到对侧")
+        msg = f"已复制 {success} 个单元格到对侧"
+        if skipped_rows:
+            msg += f"（跳过 {skipped_rows} 行仅一侧存在）"
+        self.update_status(msg)
 
     def _ctx_align_rows(self) -> None:
         """对齐行：按 Key 列对齐已在比较阶段自动完成，此处仅提示。"""
         self.update_status("对齐行（按 Key 对齐已自动完成）")
 
     def _ctx_copy_cell(self) -> None:
-        """右键：复制当前单元格文本到系统剪贴板。"""
+        """右键：复制选中单元格文本到系统剪贴板（支持多选）。"""
         if self._ctx_table is None:
             return
-        item = self._ctx_table.item(self._ctx_row, self._ctx_col)
-        if item is not None:
-            QApplication.clipboard().setText(item.text())
-            self.update_status("已复制单元格值")
-        else:
-            self.update_status("无单元格值可复制")
+        self._copy_selected_cells(self._ctx_table)
 
     # ------------------------------------------------------------------ #
     # 编辑类操作（多为桩）
@@ -1516,7 +1599,72 @@ class MainWindow(QMainWindow):
         self.update_status("TODO: 复制到右侧（Task 8）")
 
     def copy_cell(self) -> None:
-        self.update_status("TODO: 复制单元格（Task 8）")
+        """复制选中单元格到剪贴板（支持多选）。
+
+        - 多选时按行列整理为 TSV（制表符分隔列，换行分隔行），
+          可直接粘贴到 Excel/WPS。
+        - 单选时退化为纯文本。
+        - 无选中项时优先取当前单元格。
+        """
+        table = self._focused_table()
+        if table is None:
+            self.update_status("无活动表格")
+            return
+        self._copy_selected_cells(table)
+
+    def _focused_table(self) -> Optional[QTableWidget]:
+        """返回当前聚焦的表格；若都无焦点则取有选中项的表格。"""
+        for table in (self.left_table, self.right_table):
+            if table.hasFocus():
+                return table
+        for table in (self.left_table, self.right_table):
+            if table.selectedItems():
+                return table
+        return None
+
+    def _copy_selected_cells(self, table: QTableWidget) -> None:
+        """把表格中选中单元格整理为 TSV 文本写入剪贴板。"""
+        items = table.selectedItems()
+        if not items:
+            # 退化到当前单元格
+            row, col = table.currentRow(), table.currentColumn()
+            if row < 0 or col < 0:
+                self.update_status("无单元格值可复制")
+                return
+            item = table.item(row, col)
+            text = item.text() if item is not None else ""
+            QApplication.clipboard().setText(text)
+            self.update_status("已复制单元格值")
+            return
+
+        # 收集行列范围，构建稀疏字典 {row: {col: text}}
+        row_cols: dict = {}
+        min_row = min(it.row() for it in items)
+        max_row = max(it.row() for it in items)
+        min_col = min(it.column() for it in items)
+        max_col = max(it.column() for it in items)
+
+        grid: dict = {}
+        for it in items:
+            grid.setdefault(it.row(), {})[it.column()] = it.text()
+
+        # 按行拼接：缺失单元格留空
+        lines = []
+        for r in range(min_row, max_row + 1):
+            row_dict = grid.get(r, {})
+            cells = [row_dict.get(c, "") for c in range(min_col, max_col + 1)]
+            lines.append("\t".join(cells))
+        text = "\n".join(lines)
+
+        QApplication.clipboard().setText(text)
+        count = len(items)
+        if count == 1:
+            self.update_status("已复制单元格值")
+        else:
+            self.update_status(
+                f"已复制 {count} 个单元格 ({max_row - min_row + 1}行 × "
+                f"{max_col - min_col + 1}列)"
+            )
 
     def paste(self) -> None:
         self.update_status("TODO: 粘贴（Task 8）")

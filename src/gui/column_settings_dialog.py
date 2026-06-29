@@ -10,9 +10,11 @@ from __future__ import annotations
 from typing import List, Tuple
 
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -83,10 +85,27 @@ class ColumnSettingsDialog(QDialog):
         key_set = set(current_key_cols)
         ignore_set = set(current_ignore_cols)
 
-        # ---- Key 列分组 ----
+        # 列多时用多列网格，更好利用横向空间
+        if n <= 10:
+            grid_cols = 1
+        elif n <= 30:
+            grid_cols = 2
+        elif n <= 60:
+            grid_cols = 3
+        else:
+            grid_cols = 4
+
+        # ---- 内容容器：放进滚动区 ----
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+
+        # ---- Key 列分组（网格）----
         key_group = QGroupBox("Key 列（用于行匹配）")
-        key_layout = QVBoxLayout(key_group)
-        key_layout.setSpacing(2)
+        key_grid = QGridLayout(key_group)
+        key_grid.setSpacing(2)
+        key_grid.setColumnStretch(grid_cols, 1)
         for i in range(n):
             label = header_labels[i]
             cb = QCheckBox(f"{label}  (第 {i + 1} 列)")
@@ -96,13 +115,14 @@ class ColumnSettingsDialog(QDialog):
                 lambda checked, idx=i: self._on_key_toggled(idx, checked)
             )
             self._key_checks.append(cb)
-            key_layout.addWidget(cb)
-        layout.addWidget(key_group)
+            key_grid.addWidget(cb, i // grid_cols, i % grid_cols)
+        content_layout.addWidget(key_group)
 
-        # ---- 忽略列分组 ----
+        # ---- 忽略列分组（网格）----
         ignore_group = QGroupBox("忽略列（Unimportant Columns）")
-        ignore_layout = QVBoxLayout(ignore_group)
-        ignore_layout.setSpacing(2)
+        ignore_grid = QGridLayout(ignore_group)
+        ignore_grid.setSpacing(2)
+        ignore_grid.setColumnStretch(grid_cols, 1)
         for i in range(n):
             label = header_labels[i]
             cb = QCheckBox(f"{label}  (第 {i + 1} 列)")
@@ -112,15 +132,20 @@ class ColumnSettingsDialog(QDialog):
                 lambda checked, idx=i: self._on_ignore_toggled(idx, checked)
             )
             self._ignore_checks.append(cb)
-            ignore_layout.addWidget(cb)
-        layout.addWidget(ignore_group)
+            ignore_grid.addWidget(cb, i // grid_cols, i % grid_cols)
+        content_layout.addWidget(ignore_group)
 
-        # 列较多时整体可滚动
-        if n > 20:
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            # 注：此处不再重新包装，保持简单；列多时可后续优化
-            layout.addWidget(scroll)
+        # ---- 滚动区：真正包裹内容容器 ----
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        # 限制最大高度，避免超出屏幕
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            max_h = int(screen.availableGeometry().height() * 0.8)
+            self.setMaximumHeight(max_h)
 
         # ---- 按钮盒 ----
         buttons = QDialogButtonBox(

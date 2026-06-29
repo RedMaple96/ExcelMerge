@@ -165,6 +165,8 @@ class BottomBar(QFrame):
         self.btn_prev.clicked.connect(self._scroll_left)
         self.btn_prev.setContextMenuPolicy(Qt.CustomContextMenu)
         self.btn_prev.customContextMenuRequested.connect(self._on_nav_context_menu)
+        # 红点 overlay：提示左侧隐藏区有差异标签
+        self._dot_prev = self._make_dot_overlay(self.btn_prev)
         layout.addWidget(self.btn_prev)
 
         # ---- 标签滚动区域（隐藏滚动条）----
@@ -188,7 +190,7 @@ class BottomBar(QFrame):
         self._scroll.setWidget(self._tabs_container)
         layout.addWidget(self._scroll, 1)
 
-        # 滚动条范围/位置变化时更新箭头启用状态
+        # 滚动条范围/位置变化时更新箭头启用状态与红点
         hbar = self._scroll.horizontalScrollBar()
         hbar.rangeChanged.connect(self._update_nav_buttons)
         hbar.valueChanged.connect(self._update_nav_buttons)
@@ -201,6 +203,8 @@ class BottomBar(QFrame):
         self.btn_next.clicked.connect(self._scroll_right)
         self.btn_next.setContextMenuPolicy(Qt.CustomContextMenu)
         self.btn_next.customContextMenuRequested.connect(self._on_nav_context_menu)
+        # 红点 overlay：提示右侧隐藏区有差异标签
+        self._dot_next = self._make_dot_overlay(self.btn_next)
         layout.addWidget(self.btn_next)
 
         self._update_nav_buttons()
@@ -300,9 +304,10 @@ class BottomBar(QFrame):
         return self._active_name
 
     def update_diff_status(self, diff_names: Set[str]) -> None:
-        """更新各标签的红点状态。"""
+        """更新各标签的红点状态，并刷新箭头红点。"""
         for name, tab in self._tabs.items():
             tab.set_has_diff(name in diff_names)
+        self._update_nav_dots()
 
     def rename_tab(self, old_name: str, new_name: str) -> None:
         """重命名标签。"""
@@ -358,7 +363,7 @@ class BottomBar(QFrame):
             hbar.setValue(tab_right - viewport_width)
 
     def _update_nav_buttons(self, *args) -> None:
-        """根据滚动条位置与范围，启用/禁用左右箭头。"""
+        """根据滚动条位置与范围，启用/禁用左右箭头，并刷新红点。"""
         hbar = self._scroll.horizontalScrollBar()
         max_val = hbar.maximum()
         cur_val = hbar.value()
@@ -366,9 +371,56 @@ class BottomBar(QFrame):
         if max_val <= 0:
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
+            self._update_nav_dots()
             return
         self.btn_prev.setEnabled(cur_val > 0)
         self.btn_next.setEnabled(cur_val < max_val)
+        self._update_nav_dots()
+
+    def _make_dot_overlay(self, btn: QPushButton) -> QLabel:
+        """在按钮右上角创建一个红点 overlay（默认隐藏）。"""
+        dot = QLabel(btn)
+        dot.setFixedSize(6, 6)
+        dot.setStyleSheet(
+            "background-color: #e53e3e; border-radius: 3px; border: none;"
+        )
+        dot.setAttribute(Qt.WA_TransparentForMouseEvents)
+        dot.setVisible(False)
+        return dot
+
+    def _position_dot(self, btn: QPushButton, dot: QLabel) -> None:
+        """把红点定位到按钮右上角。"""
+        dot.move(btn.width() - dot.width() - 2, 2)
+
+    def _update_nav_dots(self) -> None:
+        """检查视口外（左侧/右侧隐藏区）是否有差异标签，显示对应红点。"""
+        # 先定位红点（按钮尺寸固定，可在此确定位置）
+        self._position_dot(self.btn_prev, self._dot_prev)
+        self._position_dot(self.btn_next, self._dot_next)
+
+        hbar = self._scroll.horizontalScrollBar()
+        cur = hbar.value()
+        viewport_width = self._scroll.viewport().width()
+        vis_left = cur
+        vis_right = cur + viewport_width
+
+        has_diff_left = False
+        has_diff_right = False
+        for name in self._order:
+            tab = self._tabs.get(name)
+            if tab is None or not tab._has_diff:
+                continue
+            tab_left = tab.x()
+            tab_right = tab_left + tab.width()
+            # 标签整体在可视区左侧 → 左隐藏区
+            if tab_right <= vis_left:
+                has_diff_left = True
+            # 标签整体在可视区右侧 → 右隐藏区
+            elif tab_left >= vis_right:
+                has_diff_right = True
+
+        self._dot_prev.setVisible(has_diff_left)
+        self._dot_next.setVisible(has_diff_right)
 
     # ------------------------------------------------------------------ #
     # 内部回调

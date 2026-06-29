@@ -161,8 +161,10 @@ class BottomBar(QFrame):
         self.btn_prev = QPushButton("◀")
         self.btn_prev.setFixedSize(22, 22)
         self.btn_prev.setCursor(Qt.PointingHandCursor)
-        self.btn_prev.setToolTip("向左滚动")
+        self.btn_prev.setToolTip("向左滚动（右键列出全部标签）")
         self.btn_prev.clicked.connect(self._scroll_left)
+        self.btn_prev.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.btn_prev.customContextMenuRequested.connect(self._on_nav_context_menu)
         layout.addWidget(self.btn_prev)
 
         # ---- 标签滚动区域（隐藏滚动条）----
@@ -195,8 +197,10 @@ class BottomBar(QFrame):
         self.btn_next = QPushButton("▶")
         self.btn_next.setFixedSize(22, 22)
         self.btn_next.setCursor(Qt.PointingHandCursor)
-        self.btn_next.setToolTip("向右滚动")
+        self.btn_next.setToolTip("向右滚动（右键列出全部标签）")
         self.btn_next.clicked.connect(self._scroll_right)
+        self.btn_next.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.btn_next.customContextMenuRequested.connect(self._on_nav_context_menu)
         layout.addWidget(self.btn_next)
 
         self._update_nav_buttons()
@@ -383,6 +387,33 @@ class BottomBar(QFrame):
                 return
             self.rename_tab(name, new_name)
             self.sheet_renamed.emit(name, new_name)
+
+    def _on_nav_context_menu(self, pos) -> None:
+        """右键点击左右箭头按钮：弹出全部标签列表，便于快速切换。
+
+        - 有差异的标签前显示红点图标
+        - 当前激活标签打勾
+        - 点击即切换并滚动到该标签
+        """
+        btn = self.sender()
+        if btn is None:
+            return
+        if not self._order:
+            return
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        for name in self._order:
+            tab = self._tabs.get(name)
+            action = menu.addAction(name)
+            if tab is not None and tab._has_diff:
+                action.setIcon(_make_dot_icon("#e53e3e"))
+            if name == self._active_name:
+                action.setCheckable(True)
+                action.setChecked(True)
+        chosen = menu.exec(btn.mapToGlobal(pos))
+        if chosen is not None and chosen.text() != self._active_name:
+            self.set_active(chosen.text())
+            self.sheet_activated.emit(chosen.text())
 
     # ------------------------------------------------------------------ #
     # 事件

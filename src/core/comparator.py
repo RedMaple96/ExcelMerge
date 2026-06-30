@@ -182,31 +182,19 @@ class ExcelComparator:
     ) -> List[ColPair]:
         """基于标题行（第一行）的列名用 LCS 对齐列。
 
-        - 两侧列数相同时：使用位置 1:1 配对（所有列 status="same"），保持向后兼容。
-        - 两侧列数不同时：基于标题行列名用 LCS 对齐。
-          两侧都有的列 -> same；仅左侧有的列 -> left_only；仅右侧有的列 -> right_only。
+        策略：
+        - 列数不同时：始终用 LCS 对齐（检测列增删/移位）。
+        - 列数相同时：同时计算 LCS 和位置 1:1 配对，取匹配数多的方案。
+          这样能正确处理两种情况：
+          a) 列数相同但列名有数据差异（如表头单元格值不同）→ 位置 1:1 更优
+          b) 列数相同但列被移位（如插入/删除导致后续列平移）→ LCS 更优
         - 如果任一侧无数据行，返回空列表。
+        - 如果 LCS 完全没有匹配（列名完全不同），退化为位置 1:1 配对。
         """
         n_left = left.max_col
         n_right = right.max_col
 
-        # 列数相同：位置 1:1 配对（向后兼容）
-        if n_left == n_right:
-            # 提取列名用于显示
-            names: List[str] = []
-            if left.values:
-                row0 = left.values[0]
-                names = [row0[c] if c < len(row0) else "" for c in range(n_left)]
-            elif right.values:
-                row0 = right.values[0]
-                names = [row0[c] if c < len(row0) else "" for c in range(n_right)]
-            return [
-                ColPair(left_col=c, right_col=c, status="same",
-                        label=names[c] if c < len(names) else "")
-                for c in range(n_left)
-            ]
-
-        # 列数不同：基于标题行列名 LCS 对齐
+        # 提取列名（第一行）
         left_names: List[str] = []
         right_names: List[str] = []
         if left.values:
@@ -220,13 +208,32 @@ class ExcelComparator:
         if not left_names and not right_names:
             return []
 
-        # 使用 LCS 对齐列名
+        # 列数相同：比较 LCS 和位置配对，取匹配多的
+        if n_left == n_right and n_left > 0:
+            positional_matches = sum(
+                1 for c in range(n_left) if left_names[c] == right_names[c]
+            )
+            raw = ExcelComparator._lcs_backtrace(left_names, right_names)
+            lcs_matches = sum(1 for item in raw if item[0] == "match")
+
+            # 位置配对匹配数 >= LCS 匹配数 → 用位置 1:1（处理表头数据差异）
+            if positional_matches >= lcs_matches:
+                return [
+                    ColPair(left_col=c, right_col=c, status="same",
+                            label=left_names[c])
+                    for c in range(n_left)
+                ]
+            # LCS 匹配数更多 → 列被移位，用 LCS 结果
+            return ExcelComparator._build_col_pairs_from_lcs(
+                raw, left_names, right_names
+            )
+
+        # 列数不同：始终用 LCS
         raw = ExcelComparator._lcs_backtrace(left_names, right_names)
 
-        # 如果 LCS 完全没有匹配（列名完全不同），退化为位置 1:1 配对
+        # LCS 完全无匹配 → 退化为位置配对
         match_count = sum(1 for item in raw if item[0] == "match")
         if match_count == 0 and n_left > 0 and n_right > 0:
-            # 位置 1:1 配对 min(n_left, n_right) 列，多出的标记为独占
             common = min(n_left, n_right)
             aligned_cols: List[ColPair] = []
             for c in range(common):
@@ -246,6 +253,17 @@ class ExcelComparator:
                 ))
             return aligned_cols
 
+        return ExcelComparator._build_col_pairs_from_lcs(
+            raw, left_names, right_names
+        )
+
+    @staticmethod
+    def _build_col_pairs_from_lcs(
+        raw: List[Tuple],
+        left_names: List[str],
+        right_names: List[str],
+    ) -> List[ColPair]:
+        """从 LCS 回溯结果构建 ColPair 列表。"""
         aligned_cols: List[ColPair] = []
         for item in raw:
             if item[0] == "match":

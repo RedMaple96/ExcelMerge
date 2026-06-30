@@ -51,6 +51,7 @@ from src.core.merger import ExcelMerger
 from src.gui.bottom_bar import BottomBar
 from src.gui.column_settings_dialog import ColumnSettingsDialog
 from src.gui.diff_birds_eye import DiffBirdsEyeView
+from src.gui.diff_col_birds_eye import DiffColBirdsEyeView
 from src.gui.themes import is_dark_mode
 from src.gui.workers import CompareWorker
 
@@ -140,6 +141,10 @@ class MainWindow(QMainWindow):
         panels.insertWidget(0, self.diff_birds_eye)
 
         outer.addLayout(panels, 1)
+
+        # ---- 下方：列方向差异缩略图导航条（极窄横条，标记差异列）----
+        self.diff_col_birds_eye = DiffColBirdsEyeView(self.left_table)
+        outer.addWidget(self.diff_col_birds_eye)
 
         # ---- 下方：底部导航栏 ----
         self.bottom_bar = BottomBar(self)
@@ -304,6 +309,12 @@ class MainWindow(QMainWindow):
         self.action_show_birds_eye.setChecked(True)
         self.action_show_birds_eye.toggled.connect(self._on_toggle_birds_eye)
         m_view.addAction(self.action_show_birds_eye)
+
+        self.action_show_col_birds_eye = QAction("列差异缩略图", self)
+        self.action_show_col_birds_eye.setCheckable(True)
+        self.action_show_col_birds_eye.setChecked(True)
+        self.action_show_col_birds_eye.toggled.connect(self._on_toggle_col_birds_eye)
+        m_view.addAction(self.action_show_col_birds_eye)
 
         m_view.addSeparator()
 
@@ -1077,8 +1088,9 @@ class MainWindow(QMainWindow):
         self._update_birds_eye()
 
     def _update_birds_eye(self) -> None:
-        """根据当前 diff_result 刷新全局差异缩略图的差异行标记。"""
+        """根据当前 diff_result 刷新全局差异缩略图的差异行/列标记。"""
         if self.diff_result:
+            # 行方向
             row_types = [
                 self.diff_result.aligned_rows[i].status
                 for i in self.diff_result.diff_row_indices
@@ -1086,8 +1098,18 @@ class MainWindow(QMainWindow):
             self.diff_birds_eye.set_diff_rows(
                 self.diff_result.diff_row_indices, row_types
             )
+            # 列方向：从 aligned_cols 收集差异列
+            diff_col_indices = [
+                i for i, cp in enumerate(self.diff_result.aligned_cols)
+                if cp.status in ("left_only", "right_only")
+            ]
+            col_types = [
+                self.diff_result.aligned_cols[i].status for i in diff_col_indices
+            ]
+            self.diff_col_birds_eye.set_diff_cols(diff_col_indices, col_types)
         else:
             self.diff_birds_eye.clear()
+            self.diff_col_birds_eye.clear()
 
     def _hide_row_pair(self, row: int) -> None:
         """同时隐藏两侧表格的指定行。"""
@@ -2101,8 +2123,12 @@ class MainWindow(QMainWindow):
         self.right_table.verticalHeader().setVisible(checked)
 
     def _on_toggle_birds_eye(self, checked: bool) -> None:
-        """显示/隐藏全局差异缩略图导航条。"""
+        """显示/隐藏全局差异缩略图导航条（行方向）。"""
         self.diff_birds_eye.setVisible(checked)
+
+    def _on_toggle_col_birds_eye(self, checked: bool) -> None:
+        """显示/隐藏全局差异缩略图导航条（列方向）。"""
+        self.diff_col_birds_eye.setVisible(checked)
 
     def _on_view_filter_changed(self) -> None:
         """显示差异/相同/仅左/仅右 过滤变化 —— 触发重渲染（Task 6 实装过滤）。"""

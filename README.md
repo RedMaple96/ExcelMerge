@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/RedMaple96/ExcelMerge?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
 [![Downloads](https://img.shields.io/github/downloads/RedMaple96/ExcelMerge/total?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
 
-`Excel Merge` is a desktop application for Excel diffing and merge workflows. It is designed for projects that need to load two `.xlsx` files, identify row and column differences, apply overwrite or append merge strategies, and support visual confirmation before saving. This file is ready to use as the default GitHub homepage for the repository, and you only need to replace the placeholder repository links, license, contact details, and release references.
+`Excel Merge` is a desktop application for Excel diffing and merge workflows. It is designed for projects that need to load two `.xlsx` files, identify row and column differences, apply overwrite or append merge strategies, and support visual confirmation before saving. 
 
 ## Table of Contents
 

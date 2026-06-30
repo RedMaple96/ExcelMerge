@@ -6,7 +6,7 @@
 [![版本发布](https://img.shields.io/github/v/release/RedMaple96/ExcelMerge?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
 [![下载量](https://img.shields.io/github/downloads/RedMaple96/ExcelMerge/total?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
 
-`Excel Merge` 是一个面向 Excel 差异比对与合并场景的桌面应用，适用于需要加载两个 `.xlsx` 文件、识别行列差异、执行覆盖或追加合并，并以可视化方式辅助人工确认的项目。当前文件可以直接作为仓库的中文说明文档使用，你只需要替换其中的仓库地址、许可证、联系方式与发布链接占位符即可。
+`Excel Merge` 是一个面向 Excel 差异比对与合并场景的桌面应用，适用于需要加载两个 `.xlsx` 文件、识别行列差异、执行覆盖或追加合并，并以可视化方式辅助人工确认的项目。
 
 ## 目录
 

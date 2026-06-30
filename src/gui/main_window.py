@@ -1566,6 +1566,7 @@ class MainWindow(QMainWindow):
         menu.addAction(f"复制行到{other_label}（含插入/删除）", self._ctx_copy_row)
         menu.addAction(f"复制列到{other_label}（含插入/删除）", self._ctx_copy_column)
         menu.addAction(f"复制单元格到{other_label}", self._ctx_copy_single_cell)
+        menu.addSeparator()
         menu.addAction("复制单元格值", self._ctx_copy_cell)
         menu.addSeparator()
         menu.addAction("交换左右", self.swap_sides)

@@ -326,6 +326,24 @@ class ExcelMerger:
         return insert_ws_col
 
     @staticmethod
+    def delete_row(target: SheetData, target_row_idx: int) -> None:
+        """删除 target 指定行(0-based)。
+
+        用于从少的一侧（虚拟空行）右键复制到多的一侧时，删除多出的一侧对应的行，
+        使两侧行数一致。多个删除按从后往前执行以避免位置偏移。
+        """
+        target.worksheet.delete_rows(target_row_idx + 1)
+
+    @staticmethod
+    def delete_column(target: SheetData, target_col_idx: int) -> None:
+        """删除 target 指定列(0-based)。
+
+        用于从少的一侧（虚拟空列）右键复制到多的一侧时，删除多出的一侧对应的列，
+        使两侧列数一致。多个删除按从后往前执行以避免位置偏移。
+        """
+        target.worksheet.delete_cols(target_col_idx + 1)
+
+    @staticmethod
     def _append_row(
         source: SheetData, source_row_idx: int, target: SheetData, max_col: int
     ) -> int:

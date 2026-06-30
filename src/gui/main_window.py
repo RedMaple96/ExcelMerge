@@ -1541,8 +1541,8 @@ class MainWindow(QMainWindow):
         is_left = table is self.left_table
         other_label = "右侧" if is_left else "左侧"
         menu = QMenu(self)
-        menu.addAction(f"复制行到{other_label}", self._ctx_copy_row)
-        menu.addAction(f"复制列到{other_label}", self._ctx_copy_column)
+        menu.addAction(f"复制行到{other_label}（含插入/删除）", self._ctx_copy_row)
+        menu.addAction(f"复制列到{other_label}（含插入/删除）", self._ctx_copy_column)
         menu.addAction(f"复制单元格到{other_label}", self._ctx_copy_single_cell)
         menu.addAction("对齐行", self._ctx_align_rows)
         menu.addAction("复制单元格值", self._ctx_copy_cell)
@@ -1556,8 +1556,10 @@ class MainWindow(QMainWindow):
 
         - mode="overwrite": target 行已存在，覆盖复制（双侧均有该行）。
         - mode="insert": target 需在该位置插入新行后复制（用于 left_only/right_only 行，
-          即对侧对应位置是虚拟空行的情况）。tgt_idx 为 target 中 0-based 插入位置。
-        - 无法操作（该侧无数据、无差异结果、行越界）时返回 None。
+          即在多的一侧右键，对侧对应位置是虚拟空行的情况）。tgt_idx 为 target 中 0-based 插入位置。
+        - mode="delete": 当前侧是虚拟空行（少的一侧），需删除对侧多出的行。
+          tgt_idx 为对侧 0-based 行索引。
+        - 无法操作（无差异结果、行越界）时返回 None。
         quiet=True 时不更新状态栏（用于批量场景静默跳过）。
         """
         if not self.diff_result or row < 0:
@@ -1573,12 +1575,14 @@ class MainWindow(QMainWindow):
         is_left = self._ctx_table is self.left_table
 
         if is_left:
-            # 从左侧复制到右侧
+            # 从左侧操作
             if pair.left_row is None:
-                # 左侧无数据（right_only 行的左侧空位），无法从空侧复制
-                if not quiet:
-                    self.update_status("该侧无数据，无法复制")
-                return None
+                # 左侧是虚拟空行（right_only 行），右侧多出 -> 删除右侧对应行
+                return (
+                    None, None,
+                    self.right_sheet_data, pair.right_row,
+                    "right", "delete",
+                )
             if pair.right_row is not None:
                 # 双侧都有该行 -> 覆盖
                 return (
@@ -1590,7 +1594,6 @@ class MainWindow(QMainWindow):
                     "overwrite",
                 )
             # left_only 行：右侧对应位置是虚拟空行 -> 插入到右侧
-            # 插入位置(0-based) = 前面已存在的右侧行数
             insert_idx = sum(1 for p in aligned[:row] if p.right_row is not None)
             return (
                 self.left_sheet_data,
@@ -1601,11 +1604,14 @@ class MainWindow(QMainWindow):
                 "insert",
             )
         else:
-            # 从右侧复制到左侧
+            # 从右侧操作
             if pair.right_row is None:
-                if not quiet:
-                    self.update_status("该侧无数据，无法复制")
-                return None
+                # 右侧是虚拟空行（left_only 行），左侧多出 -> 删除左侧对应行
+                return (
+                    None, None,
+                    self.left_sheet_data, pair.left_row,
+                    "left", "delete",
+                )
             if pair.left_row is not None:
                 return (
                     self.right_sheet_data,
@@ -1680,6 +1686,7 @@ class MainWindow(QMainWindow):
 
         overwrite_tasks = [t for t in tasks if t[5] == "overwrite"]
         insert_tasks = [t for t in tasks if t[5] == "insert"]
+        delete_tasks = [t for t in tasks if t[5] == "delete"]
 
         failures = 0
         last_exc: Optional[Exception] = None
@@ -1706,6 +1713,16 @@ class MainWindow(QMainWindow):
                 failures += 1
                 last_exc = exc
 
+        # 最后执行删除（从后往前，避免位置偏移）
+        for _source, _src_idx, target, tgt_idx, _side, _mode in sorted(
+            delete_tasks, key=lambda t: t[3], reverse=True
+        ):
+            try:
+                ExcelMerger.delete_row(target, tgt_idx)
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                last_exc = exc
+
         if failures:
             QMessageBox.critical(
                 self, "复制失败", f"复制行失败 ({failures}/{len(tasks)}):\n{last_exc}"
@@ -1716,6 +1733,8 @@ class MainWindow(QMainWindow):
         msg = f"已复制 {len(tasks)} 行到对侧"
         if insert_tasks:
             msg += f"（其中 {len(insert_tasks)} 行为新增插入）"
+        if delete_tasks:
+            msg += f"（其中 {len(delete_tasks)} 行为删除对侧多出行）"
         if skipped:
             msg += f"（跳过 {skipped} 行无数据）"
         self.update_status(msg)
@@ -1727,6 +1746,8 @@ class MainWindow(QMainWindow):
         - mode="overwrite": target 列已存在，覆盖复制（same 列）。
         - mode="insert": target 需在该位置插入新列后复制（left_only/right_only 列，
           即对侧对应位置是虚拟空列）。tgt_col 为 target 中 0-based 插入位置。
+        - mode="delete": 当前侧是虚拟空列（少的一侧），需删除对侧多出的列。
+          tgt_col 为对侧 0-based 列索引。
         - 无法操作时返回 None。
         """
         if not self.diff_result or col < 0:
@@ -1742,11 +1763,14 @@ class MainWindow(QMainWindow):
         is_left = self._ctx_table is self.left_table
 
         if is_left:
-            # 从左侧复制到右侧
+            # 从左侧操作
             if cp.left_col is None:
-                if not quiet:
-                    self.update_status("该侧无此列，无法复制")
-                return None
+                # 左侧是虚拟空列（right_only 列），右侧多出 -> 删除右侧对应列
+                return (
+                    None, None,
+                    self.right_sheet_data, cp.right_col,
+                    "right", "delete",
+                )
             if cp.right_col is not None:
                 # same 列 -> 覆盖
                 return (
@@ -1755,7 +1779,6 @@ class MainWindow(QMainWindow):
                     "right", "overwrite",
                 )
             # left_only 列：右侧对应位置是虚拟空列 -> 插入到右侧
-            # 插入位置(0-based) = 前面已存在的右侧列数
             insert_idx = sum(
                 1 for c in aligned_cols[:col] if c.right_col is not None
             )
@@ -1765,11 +1788,14 @@ class MainWindow(QMainWindow):
                 "right", "insert",
             )
         else:
-            # 从右侧复制到左侧
+            # 从右侧操作
             if cp.right_col is None:
-                if not quiet:
-                    self.update_status("该侧无此列，无法复制")
-                return None
+                # 右侧是虚拟空列（left_only 列），左侧多出 -> 删除左侧对应列
+                return (
+                    None, None,
+                    self.left_sheet_data, cp.left_col,
+                    "left", "delete",
+                )
             if cp.left_col is not None:
                 return (
                     self.right_sheet_data, cp.right_col,
@@ -1836,6 +1862,7 @@ class MainWindow(QMainWindow):
 
         overwrite_tasks = [t for t in tasks if t[5] == "overwrite"]
         insert_tasks = [t for t in tasks if t[5] == "insert"]
+        delete_tasks = [t for t in tasks if t[5] == "delete"]
 
         failures = 0
         last_exc: Optional[Exception] = None
@@ -1862,6 +1889,16 @@ class MainWindow(QMainWindow):
                 failures += 1
                 last_exc = exc
 
+        # 最后执行删除（从后往前，避免位置偏移）
+        for _source, _src_col, target, tgt_col, _side, _mode in sorted(
+            delete_tasks, key=lambda t: t[3], reverse=True
+        ):
+            try:
+                ExcelMerger.delete_column(target, tgt_col)
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                last_exc = exc
+
         if failures:
             QMessageBox.critical(
                 self, "复制失败", f"复制列失败 ({failures}/{len(tasks)}):\n{last_exc}"
@@ -1871,6 +1908,9 @@ class MainWindow(QMainWindow):
         self._post_merge(side)
         msg = f"已复制 {len(tasks)} 列到对侧"
         if insert_tasks:
+            msg += f"（其中 {len(insert_tasks)} 列为新增插入）"
+        if delete_tasks:
+            msg += f"（其中 {len(delete_tasks)} 列为删除对侧多出列）"
             msg += f"（其中 {len(insert_tasks)} 列为新增插入）"
         if skipped:
             msg += f"（跳过 {skipped} 列无数据）"
@@ -1904,8 +1944,8 @@ class MainWindow(QMainWindow):
             res = self._resolve_pair_for_row(row, quiet=True)
             if res is None:
                 skipped_rows += 1
-            elif res[5] == "insert":
-                # 插入模式（对侧无该行）不支持单格复制，跳过
+            elif res[5] in ("insert", "delete"):
+                # 插入/删除模式（对侧无该行）不支持单格复制，跳过
                 skipped_rows += 1
             else:
                 row_resolved[row] = res

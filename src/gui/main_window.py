@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (
@@ -1542,6 +1542,7 @@ class MainWindow(QMainWindow):
         other_label = "右侧" if is_left else "左侧"
         menu = QMenu(self)
         menu.addAction(f"复制行到{other_label}", self._ctx_copy_row)
+        menu.addAction(f"复制列到{other_label}", self._ctx_copy_column)
         menu.addAction(f"复制单元格到{other_label}", self._ctx_copy_single_cell)
         menu.addAction("对齐行", self._ctx_align_rows)
         menu.addAction("复制单元格值", self._ctx_copy_cell)
@@ -1635,6 +1636,7 @@ class MainWindow(QMainWindow):
         - 覆盖模式（双侧都有该行）：直接复制到对侧已存在行。
         - 插入模式（left_only/right_only 行）：在对侧对应位置插入新行后复制，
           多个插入按从后往前执行以避免位置偏移。
+        - 列映射：按 aligned_cols 的 same 列映射复制，避免列结构不同时错位。
         """
         if self._ctx_table is None:
             return
@@ -1665,6 +1667,17 @@ class MainWindow(QMainWindow):
             return
 
         side = tasks[0][4]
+        is_left = self._ctx_table is self.left_table
+        # 构建列映射：same 列的 (src_col, tgt_col)，按对齐顺序
+        aligned_cols = self.diff_result.aligned_cols
+        col_mapping: List[Tuple[int, int]] = []
+        for cp in aligned_cols:
+            if cp.status == "same":
+                if is_left:
+                    col_mapping.append((cp.left_col, cp.right_col))
+                else:
+                    col_mapping.append((cp.right_col, cp.left_col))
+
         overwrite_tasks = [t for t in tasks if t[5] == "overwrite"]
         insert_tasks = [t for t in tasks if t[5] == "insert"]
 
@@ -1674,9 +1687,8 @@ class MainWindow(QMainWindow):
         # 先执行覆盖（不改变行数，位置稳定）
         for source, src_idx, target, tgt_idx, _side, _mode in overwrite_tasks:
             try:
-                # 使用 source 的实际列数，而非 aligned 列数
                 ExcelMerger.copy_row_to_other(
-                    source, src_idx, target, tgt_idx, source.max_col
+                    source, src_idx, target, tgt_idx, 0, col_mapping
                 )
             except Exception as exc:  # noqa: BLE001
                 failures += 1
@@ -1688,7 +1700,7 @@ class MainWindow(QMainWindow):
         ):
             try:
                 ExcelMerger.insert_row_to_other(
-                    source, src_idx, target, tgt_idx, source.max_col
+                    source, src_idx, target, tgt_idx, 0, col_mapping
                 )
             except Exception as exc:  # noqa: BLE001
                 failures += 1
@@ -1706,6 +1718,162 @@ class MainWindow(QMainWindow):
             msg += f"（其中 {len(insert_tasks)} 行为新增插入）"
         if skipped:
             msg += f"（跳过 {skipped} 行无数据）"
+        self.update_status(msg)
+
+    def _resolve_pair_for_col(self, col: int, quiet: bool = False):
+        """根据 _ctx_table 与指定列(aligned_col 索引)解析对齐列。
+
+        返回 (source, src_col, target, tgt_col, side, mode)：
+        - mode="overwrite": target 列已存在，覆盖复制（same 列）。
+        - mode="insert": target 需在该位置插入新列后复制（left_only/right_only 列，
+          即对侧对应位置是虚拟空列）。tgt_col 为 target 中 0-based 插入位置。
+        - 无法操作时返回 None。
+        """
+        if not self.diff_result or col < 0:
+            if not quiet:
+                self.update_status("无有效列可操作")
+            return None
+        aligned_cols = self.diff_result.aligned_cols
+        if col >= len(aligned_cols):
+            if not quiet:
+                self.update_status("列索引越界")
+            return None
+        cp = aligned_cols[col]
+        is_left = self._ctx_table is self.left_table
+
+        if is_left:
+            # 从左侧复制到右侧
+            if cp.left_col is None:
+                if not quiet:
+                    self.update_status("该侧无此列，无法复制")
+                return None
+            if cp.right_col is not None:
+                # same 列 -> 覆盖
+                return (
+                    self.left_sheet_data, cp.left_col,
+                    self.right_sheet_data, cp.right_col,
+                    "right", "overwrite",
+                )
+            # left_only 列：右侧对应位置是虚拟空列 -> 插入到右侧
+            # 插入位置(0-based) = 前面已存在的右侧列数
+            insert_idx = sum(
+                1 for c in aligned_cols[:col] if c.right_col is not None
+            )
+            return (
+                self.left_sheet_data, cp.left_col,
+                self.right_sheet_data, insert_idx,
+                "right", "insert",
+            )
+        else:
+            # 从右侧复制到左侧
+            if cp.right_col is None:
+                if not quiet:
+                    self.update_status("该侧无此列，无法复制")
+                return None
+            if cp.left_col is not None:
+                return (
+                    self.right_sheet_data, cp.right_col,
+                    self.left_sheet_data, cp.left_col,
+                    "left", "overwrite",
+                )
+            # right_only 列：左侧对应位置是虚拟空列 -> 插入到左侧
+            insert_idx = sum(
+                1 for c in aligned_cols[:col] if c.left_col is not None
+            )
+            return (
+                self.right_sheet_data, cp.right_col,
+                self.left_sheet_data, insert_idx,
+                "left", "insert",
+            )
+
+    def _ctx_copy_column(self) -> None:
+        """右键：把选中列整列（值与样式）复制到对侧对应列（支持多选）。
+
+        - 覆盖模式（same 列）：直接复制到对侧已存在列。
+        - 插入模式（left_only/right_only 列）：在对侧对应位置插入新列后复制，
+          多个插入按从后往前执行以避免位置偏移。
+        - 行映射：按 aligned_rows 的 same 行映射复制，避免行结构不同时错位。
+        """
+        if self._ctx_table is None:
+            return
+        if not self.diff_result:
+            self.update_status("无差异结果，无法复制")
+            return
+
+        # 收集选中列（去重 + 排序），无选中时退化为当前列
+        cols = {it.column() for it in self._ctx_table.selectedItems()}
+        if not cols and self._ctx_col >= 0:
+            cols = {self._ctx_col}
+        if not cols:
+            self.update_status("无有效列可复制")
+            return
+
+        # 先解析所有可复制列（_post_merge 会清空 diff_result，必须提前收集）
+        tasks = []
+        skipped = 0
+        for col in sorted(cols):
+            resolved = self._resolve_pair_for_col(col, quiet=True)
+            if resolved is None:
+                skipped += 1
+                continue
+            tasks.append(resolved)
+
+        if not tasks:
+            self.update_status("选中列无有效数据可复制")
+            return
+
+        side = tasks[0][4]
+        is_left = self._ctx_table is self.left_table
+        # 构建行映射：same 行的 (src_row, tgt_row)，按对齐顺序
+        aligned_rows = self.diff_result.aligned_rows
+        row_mapping: List[Tuple[int, int]] = []
+        for pair in aligned_rows:
+            if pair.status == "same":
+                if is_left:
+                    row_mapping.append((pair.left_row, pair.right_row))
+                else:
+                    row_mapping.append((pair.right_row, pair.left_row))
+
+        overwrite_tasks = [t for t in tasks if t[5] == "overwrite"]
+        insert_tasks = [t for t in tasks if t[5] == "insert"]
+
+        failures = 0
+        last_exc: Optional[Exception] = None
+
+        # 先执行覆盖（不改变列数，位置稳定）
+        for source, src_col, target, tgt_col, _side, _mode in overwrite_tasks:
+            try:
+                ExcelMerger.copy_column_to_other(
+                    source, src_col, target, tgt_col, 0, row_mapping
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                last_exc = exc
+
+        # 再执行插入（从后往前，避免位置偏移）
+        for source, src_col, target, tgt_col, _side, _mode in sorted(
+            insert_tasks, key=lambda t: t[3], reverse=True
+        ):
+            try:
+                ExcelMerger.insert_column_to_other(
+                    source, src_col, target, tgt_col, 0, row_mapping
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                last_exc = exc
+
+        if failures:
+            QMessageBox.critical(
+                self, "复制失败", f"复制列失败 ({failures}/{len(tasks)}):\n{last_exc}"
+            )
+            return
+
+        self._post_merge(side)
+        msg = f"已复制 {len(tasks)} 列到对侧"
+        if insert_tasks:
+            msg += f"（其中 {len(insert_tasks)} 列为新增插入）"
+        if skipped:
+            msg += f"（跳过 {skipped} 列无数据）"
         self.update_status(msg)
 
     def _ctx_copy_single_cell(self) -> None:

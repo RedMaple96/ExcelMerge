@@ -137,19 +137,30 @@ class ExcelMerger:
         target: SheetData,
         target_row_idx: int,
         max_col: int,
+        col_mapping: Optional[List[Tuple[int, int]]] = None,
     ) -> None:
-        """逐项手动合并：把 source 指定行(0-based)整行(列 0..max_col-1)值与样式复制到 target 指定行(0-based)。
+        """把 source 指定行(0-based)整行值与样式复制到 target 指定行(0-based)。
 
-        target_row_idx 必须是已存在的行；如需追加到末尾，调用方应先扩展 target worksheet。
+        - col_mapping: 提供 [(src_col_0based, tgt_col_0based), ...] 时按映射复制，
+          只复制映射中的列（用于两侧列结构不同时按对齐列复制）。
+          不提供时按位置 0..max_col-1 复制（向后兼容）。
+        - target_row_idx 必须是已存在的行。
         """
         src_ws_row = source_row_idx + 1
         tgt_ws_row = target_row_idx + 1
-        for col in range(max_col):
-            ws_col = col + 1
-            src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
-            tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=ws_col)
-            ExcelLoader.copy_cell_value(src_cell, tgt_cell)
-            ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        if col_mapping is not None:
+            for src_col, tgt_col in col_mapping:
+                src_cell = source.worksheet.cell(row=src_ws_row, column=src_col + 1)
+                tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=tgt_col + 1)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        else:
+            for col in range(max_col):
+                ws_col = col + 1
+                src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
+                tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=ws_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
     @staticmethod
     def insert_row_to_other(
@@ -158,15 +169,17 @@ class ExcelMerger:
         target: SheetData,
         target_insert_row_idx: int,
         max_col: int,
+        col_mapping: Optional[List[Tuple[int, int]]] = None,
     ) -> int:
         """在 target 指定位置插入新行，并从 source 复制整行值与样式。
 
-        用于把 left_only/right_only 行复制到对侧对应位置（在虚拟空行处新增行），
-        区别于 copy_row_to_other（覆盖已存在行）与 _append_row（追加到末尾）。
+        用于把 left_only/right_only 行复制到对侧对应位置（在虚拟空行处新增行）。
 
+        - col_mapping: 提供 [(src_col_0based, tgt_col_0based), ...] 时按映射复制，
+          只复制映射中的列（用于两侧列结构不同时按对齐列复制）。
+          不提供时按位置 0..max_col-1 复制（向后兼容）。
         - target_insert_row_idx: 0-based，新行插入后位于该索引位置；
           原该位置及之后的行整体后移（openpyxl insert_rows）。
-        - 逐列(0..max_col-1)复制值与样式。
         - 合并单元格重建：仅处理以源行为左上角的合并区域，在 target 中以插入行
           为新 min_row、保持列范围与行跨度不变重建。
         - 返回插入行号(1-based)。
@@ -175,12 +188,19 @@ class ExcelMerger:
         target.worksheet.insert_rows(insert_ws_row)
 
         src_ws_row = source_row_idx + 1
-        for col in range(max_col):
-            ws_col = col + 1
-            src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
-            tgt_cell = target.worksheet.cell(row=insert_ws_row, column=ws_col)
-            ExcelLoader.copy_cell_value(src_cell, tgt_cell)
-            ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        if col_mapping is not None:
+            for src_col, tgt_col in col_mapping:
+                src_cell = source.worksheet.cell(row=src_ws_row, column=src_col + 1)
+                tgt_cell = target.worksheet.cell(row=insert_ws_row, column=tgt_col + 1)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        else:
+            for col in range(max_col):
+                ws_col = col + 1
+                src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
+                tgt_cell = target.worksheet.cell(row=insert_ws_row, column=ws_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
         # 重建以源行为左上角的合并区域
         for min_r, min_c, max_r, max_c in ExcelMerger._find_merged_ranges_for_row(
@@ -214,6 +234,96 @@ class ExcelMerger:
         tgt_cell = target.worksheet.cell(row=target_row_idx + 1, column=col_idx + 1)
         ExcelLoader.copy_cell_value(src_cell, tgt_cell)
         ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+
+    @staticmethod
+    def copy_column_to_other(
+        source: SheetData,
+        source_col_idx: int,
+        target: SheetData,
+        target_col_idx: int,
+        max_row: int,
+        row_mapping: Optional[List[Tuple[int, int]]] = None,
+    ) -> None:
+        """把 source 指定列(0-based)整列值与样式复制到 target 指定列(0-based)。
+
+        - row_mapping: 提供 [(src_row_0based, tgt_row_0based), ...] 时按映射复制，
+          只复制映射中的行（用于两侧行结构不同时按对齐行复制）。
+          不提供时按位置 0..max_row-1 复制（向后兼容）。
+        - target_col_idx 必须是已存在的列。
+        """
+        src_ws_col = source_col_idx + 1
+        tgt_ws_col = target_col_idx + 1
+        if row_mapping is not None:
+            for src_row, tgt_row in row_mapping:
+                src_cell = source.worksheet.cell(row=src_row + 1, column=src_ws_col)
+                tgt_cell = target.worksheet.cell(row=tgt_row + 1, column=tgt_ws_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        else:
+            for row in range(max_row):
+                ws_row = row + 1
+                src_cell = source.worksheet.cell(row=ws_row, column=src_ws_col)
+                tgt_cell = target.worksheet.cell(row=ws_row, column=tgt_ws_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+
+    @staticmethod
+    def insert_column_to_other(
+        source: SheetData,
+        source_col_idx: int,
+        target: SheetData,
+        target_insert_col_idx: int,
+        max_row: int,
+        row_mapping: Optional[List[Tuple[int, int]]] = None,
+    ) -> int:
+        """在 target 指定位置插入新列，并从 source 复制整列值与样式。
+
+        用于把 left_only/right_only 列复制到对侧对应位置（在虚拟空列处新增列）。
+
+        - row_mapping: 提供 [(src_row_0based, tgt_row_0based), ...] 时按映射复制，
+          只复制映射中的行（用于两侧行结构不同时按对齐行复制）。
+          不提供时按位置 0..max_row-1 复制（向后兼容）。
+        - target_insert_col_idx: 0-based，新列插入后位于该索引位置；
+          原该位置及之后的列整体右移（openpyxl insert_cols）。
+        - 合并单元格重建：仅处理以源列为左上角的合并区域，在 target 中以插入列
+          为新 min_col、保持行范围与列跨度不变重建。
+        - 返回插入列号(1-based)。
+        """
+        insert_ws_col = target_insert_col_idx + 1  # 0-based -> 1-based
+        target.worksheet.insert_cols(insert_ws_col)
+
+        src_ws_col = source_col_idx + 1
+        if row_mapping is not None:
+            for src_row, tgt_row in row_mapping:
+                src_cell = source.worksheet.cell(row=src_row + 1, column=src_ws_col)
+                tgt_cell = target.worksheet.cell(row=tgt_row + 1, column=insert_ws_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        else:
+            for row in range(max_row):
+                ws_row = row + 1
+                src_cell = source.worksheet.cell(row=ws_row, column=src_ws_col)
+                tgt_cell = target.worksheet.cell(row=ws_row, column=insert_ws_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+
+        # 重建以源列为左上角的合并区域
+        for min_r, min_c, max_r, max_c in ExcelMerger._find_merged_ranges_for_col(
+            source, src_ws_col
+        ):
+            new_min_col = insert_ws_col
+            new_max_col = insert_ws_col + (max_c - min_c)
+            try:
+                target.worksheet.merge_cells(
+                    start_row=min_r,
+                    start_column=new_min_col,
+                    end_row=max_r,
+                    end_column=new_max_col,
+                )
+            except Exception:
+                continue
+
+        return insert_ws_col
 
     @staticmethod
     def _append_row(
@@ -270,4 +380,18 @@ class ExcelMerger:
             (min_r, min_c, max_r, max_c)
             for (min_r, min_c, max_r, max_c) in sheet_data.merged_ranges
             if min_r == row_1based
+        ]
+
+    @staticmethod
+    def _find_merged_ranges_for_col(
+        sheet_data: SheetData, col_1based: int
+    ) -> List[Tuple[int, int, int, int]]:
+        """返回 sheet_data.merged_ranges 中 min_col == col_1based 的所有 range。
+
+        即以该列为左上角的合并区域。
+        """
+        return [
+            (min_r, min_c, max_r, max_c)
+            for (min_r, min_c, max_r, max_c) in sheet_data.merged_ranges
+            if min_c == col_1based
         ]

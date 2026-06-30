@@ -1872,11 +1872,13 @@ class MainWindow(QMainWindow):
 
         side = tasks[0][4]
         is_left = self._ctx_table is self.left_table
-        # 构建行映射：same 行的 (src_row, tgt_row)，按对齐顺序
+        # 构建行映射：双侧都有数据的行（same + different）的 (src_row, tgt_row)，
+        # 按对齐顺序。different 行两侧都有该行，列值应当被复制，否则差异行
+        # 的单元格不会被更新，导致复制后差异仍在。
         aligned_rows = self.diff_result.aligned_rows
         row_mapping: List[Tuple[int, int]] = []
         for pair in aligned_rows:
-            if pair.status == "same":
+            if pair.status in ("same", "different"):
                 if is_left:
                     row_mapping.append((pair.left_row, pair.right_row))
                 else:
@@ -1933,7 +1935,6 @@ class MainWindow(QMainWindow):
             msg += f"（其中 {len(insert_tasks)} 列为新增插入）"
         if delete_tasks:
             msg += f"（其中 {len(delete_tasks)} 列为删除对侧多出列）"
-            msg += f"（其中 {len(insert_tasks)} 列为新增插入）"
         if skipped:
             msg += f"（跳过 {skipped} 列无数据）"
         self.update_status(msg)

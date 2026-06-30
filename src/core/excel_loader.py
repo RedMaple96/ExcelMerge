@@ -131,12 +131,18 @@ class ExcelLoader:
         - None -> ""
         - bool -> "TRUE"/"FALSE"（bool 是 int 子类，必须先于 int 判断）
         - 公式（以 "=" 开头的字符串）原样保留
+        - ArrayFormula / DataTableFormula 等公式对象：取其 text 属性
+          （数组公式文本，如 "=SUM(A1:A2)"），避免 str() 输出对象地址
         - 其它类型直接 str()
         """
         if value is None:
             return ""
         if isinstance(value, bool):
             return "TRUE" if value else "FALSE"
+        # ArrayFormula 等公式对象：取 text 属性，避免 str() 输出对象地址
+        text = getattr(value, "text", None)
+        if text is not None:
+            return str(text)
         return str(value)
 
     @staticmethod
@@ -161,10 +167,16 @@ class ExcelLoader:
     def copy_cell_value(src_cell, tgt_cell) -> None:
         """复制单元格值。
 
-        公式（以 "=" 开头的字符串）原样写入，否则写入原始值（含 None）。
+        - 普通公式（以 "=" 开头的字符串）原样写入，openpyxl 自动识别为公式。
+        - 数组公式（ArrayFormula 对象）：提取其 text（公式文本）以普通公式
+          字符串写入目标单元格，避免直接赋值对象导致 ref 仍指向源位置、
+          目标单元格引用错误。
+        - 其它值（含 None）直接写入。
         """
         value = src_cell.value
-        if isinstance(value, str) and value.startswith("="):
-            tgt_cell.value = value
+        # ArrayFormula 等公式对象：取 text 属性以普通公式字符串写入
+        text = getattr(value, "text", None)
+        if text is not None:
+            tgt_cell.value = text
         else:
             tgt_cell.value = value

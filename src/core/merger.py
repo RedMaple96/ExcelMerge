@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from src.core.comparator import DiffResult, RowPair
+from src.core.comparator import ColPair, DiffResult, RowPair
 from src.core.excel_loader import ExcelLoader, SheetData
 
 
@@ -30,25 +30,44 @@ class ExcelMerger:
     ) -> None:
         """右覆盖：以右侧为准，将右侧与左侧不同的单元格值及样式复制到左侧。
 
-        - "different" 行：按 diff_cells 逐列把右侧单元格复制到左侧对应位置。
-        - "right_only" 行：把右侧整行追加到左侧工作表末尾（调用 _append_row）。
+        - "different" 行：按 diff_cells（aligned_col 索引）逐列把右侧单元格复制到左侧。
+          使用 aligned_cols 映射到实际列号。
+        - "right_only" 行：在左侧对应位置插入新行并复制右侧整行（保持对齐位置，
+          而非追加到末尾）。多个插入按从后往前执行，避免位置偏移。
         """
-        # 追加行时需要的列数：取两侧与比较结果中的最大值，确保不丢列
-        append_max_col = max(left.max_col, right.max_col, diff_result.max_col)
+        aligned_cols = diff_result.aligned_cols
+        insert_max_col = max(left.max_col, right.max_col)
 
-        for pair in diff_result.aligned_rows:
+        # 收集需要插入的 (插入位置0-based, 源行0-based)，从后往前执行
+        inserts: List[Tuple[int, int]] = []
+        for i, pair in enumerate(diff_result.aligned_rows):
             if pair.status == "different":
-                # 0-based -> 1-based 行号
                 left_ws_row = pair.left_row + 1
                 right_ws_row = pair.right_row + 1
-                for col in pair.diff_cells:
-                    ws_col = col + 1
-                    src_cell = right.worksheet.cell(row=right_ws_row, column=ws_col)
-                    tgt_cell = left.worksheet.cell(row=left_ws_row, column=ws_col)
+                for aligned_col in pair.diff_cells:
+                    if aligned_col >= len(aligned_cols):
+                        continue
+                    cp = aligned_cols[aligned_col]
+                    if cp.status != "same":
+                        continue
+                    src_cell = right.worksheet.cell(
+                        row=right_ws_row, column=cp.right_col + 1
+                    )
+                    tgt_cell = left.worksheet.cell(
+                        row=left_ws_row, column=cp.left_col + 1
+                    )
                     ExcelLoader.copy_cell_value(src_cell, tgt_cell)
                     ExcelLoader.copy_cell_style(src_cell, tgt_cell)
             elif pair.status == "right_only":
-                ExcelMerger._append_row(right, pair.right_row, left, append_max_col)
+                insert_idx = sum(
+                    1 for p in diff_result.aligned_rows[:i] if p.left_row is not None
+                )
+                inserts.append((insert_idx, pair.right_row))
+
+        for insert_idx, src_row in sorted(inserts, key=lambda x: x[0], reverse=True):
+            ExcelMerger.insert_row_to_other(
+                right, src_row, left, insert_idx, insert_max_col
+            )
 
     @staticmethod
     def merge_left_to_right(
@@ -56,23 +75,43 @@ class ExcelMerger:
     ) -> None:
         """左覆盖：以左侧为准，镜像右覆盖操作。
 
-        - "different" 行：按 diff_cells 逐列把左侧单元格复制到右侧对应位置。
-        - "left_only" 行：把左侧整行追加到右侧工作表末尾。
+        - "different" 行：按 diff_cells（aligned_col 索引）逐列把左侧单元格复制到右侧。
+          使用 aligned_cols 映射到实际列号。
+        - "left_only" 行：在右侧对应位置插入新行并复制左侧整行（保持对齐位置，
+          而非追加到末尾）。多个插入按从后往前执行，避免位置偏移。
         """
-        append_max_col = max(left.max_col, right.max_col, diff_result.max_col)
+        aligned_cols = diff_result.aligned_cols
+        insert_max_col = max(left.max_col, right.max_col)
 
-        for pair in diff_result.aligned_rows:
+        inserts: List[Tuple[int, int]] = []
+        for i, pair in enumerate(diff_result.aligned_rows):
             if pair.status == "different":
                 left_ws_row = pair.left_row + 1
                 right_ws_row = pair.right_row + 1
-                for col in pair.diff_cells:
-                    ws_col = col + 1
-                    src_cell = left.worksheet.cell(row=left_ws_row, column=ws_col)
-                    tgt_cell = right.worksheet.cell(row=right_ws_row, column=ws_col)
+                for aligned_col in pair.diff_cells:
+                    if aligned_col >= len(aligned_cols):
+                        continue
+                    cp = aligned_cols[aligned_col]
+                    if cp.status != "same":
+                        continue
+                    src_cell = left.worksheet.cell(
+                        row=left_ws_row, column=cp.left_col + 1
+                    )
+                    tgt_cell = right.worksheet.cell(
+                        row=right_ws_row, column=cp.right_col + 1
+                    )
                     ExcelLoader.copy_cell_value(src_cell, tgt_cell)
                     ExcelLoader.copy_cell_style(src_cell, tgt_cell)
             elif pair.status == "left_only":
-                ExcelMerger._append_row(left, pair.left_row, right, append_max_col)
+                insert_idx = sum(
+                    1 for p in diff_result.aligned_rows[:i] if p.right_row is not None
+                )
+                inserts.append((insert_idx, pair.left_row))
+
+        for insert_idx, src_row in sorted(inserts, key=lambda x: x[0], reverse=True):
+            ExcelMerger.insert_row_to_other(
+                left, src_row, right, insert_idx, insert_max_col
+            )
 
     @staticmethod
     def append_rows(
@@ -86,7 +125,7 @@ class ExcelMerger:
         - 不处理 "different" 行，保持左侧原值不变。
         - key_cols 参数保留以匹配调用方签名，本方法不依赖它。
         """
-        append_max_col = max(left.max_col, right.max_col, diff_result.max_col)
+        append_max_col = max(left.max_col, right.max_col)
         for pair in diff_result.aligned_rows:
             if pair.status == "right_only":
                 ExcelMerger._append_row(right, pair.right_row, left, append_max_col)
@@ -111,6 +150,56 @@ class ExcelMerger:
             tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=ws_col)
             ExcelLoader.copy_cell_value(src_cell, tgt_cell)
             ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+
+    @staticmethod
+    def insert_row_to_other(
+        source: SheetData,
+        source_row_idx: int,
+        target: SheetData,
+        target_insert_row_idx: int,
+        max_col: int,
+    ) -> int:
+        """在 target 指定位置插入新行，并从 source 复制整行值与样式。
+
+        用于把 left_only/right_only 行复制到对侧对应位置（在虚拟空行处新增行），
+        区别于 copy_row_to_other（覆盖已存在行）与 _append_row（追加到末尾）。
+
+        - target_insert_row_idx: 0-based，新行插入后位于该索引位置；
+          原该位置及之后的行整体后移（openpyxl insert_rows）。
+        - 逐列(0..max_col-1)复制值与样式。
+        - 合并单元格重建：仅处理以源行为左上角的合并区域，在 target 中以插入行
+          为新 min_row、保持列范围与行跨度不变重建。
+        - 返回插入行号(1-based)。
+        """
+        insert_ws_row = target_insert_row_idx + 1  # 0-based -> 1-based
+        target.worksheet.insert_rows(insert_ws_row)
+
+        src_ws_row = source_row_idx + 1
+        for col in range(max_col):
+            ws_col = col + 1
+            src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
+            tgt_cell = target.worksheet.cell(row=insert_ws_row, column=ws_col)
+            ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+            ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+
+        # 重建以源行为左上角的合并区域
+        for min_r, min_c, max_r, max_c in ExcelMerger._find_merged_ranges_for_row(
+            source, src_ws_row
+        ):
+            new_min_row = insert_ws_row
+            new_max_row = insert_ws_row + (max_r - min_r)
+            try:
+                target.worksheet.merge_cells(
+                    start_row=new_min_row,
+                    start_column=min_c,
+                    end_row=new_max_row,
+                    end_column=max_c,
+                )
+            except Exception:
+                # target 已有重叠合并区域时跳过，避免中断整体流程
+                continue
+
+        return insert_ws_row
 
     @staticmethod
     def copy_single_cell(

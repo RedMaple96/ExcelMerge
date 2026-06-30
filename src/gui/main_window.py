@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 from openpyxl.utils import get_column_letter
 
-from src.core.comparator import DiffResult, ExcelComparator
+from src.core.comparator import ColPair, DiffResult, ExcelComparator
 from src.core.excel_loader import ExcelLoader, SheetData
 from src.core.merger import ExcelMerger
 from src.gui.bottom_bar import BottomBar
@@ -780,14 +780,14 @@ class MainWindow(QMainWindow):
     def _refresh_tables(self) -> None:
         """刷新左右表格内容。
 
-        - 若 diff_result 可用且两侧数据齐全：按对齐行渲染（两侧行数一致）
+        - 若 diff_result 可用且两侧数据齐全：按对齐行+对齐列渲染（两侧行数/列数一致）
         - 否则：按原始行渲染，行数取 max(左, 右) 保证视觉对齐
         """
         left = self.left_sheet_data
         right = self.right_sheet_data
 
         if self.diff_result and left and right:
-            max_col = self.diff_result.max_col
+            aligned_cols = self.diff_result.aligned_cols
             left_indices = [p.left_row for p in self.diff_result.aligned_rows]
             right_indices = [p.right_row for p in self.diff_result.aligned_rows]
         else:
@@ -795,55 +795,77 @@ class MainWindow(QMainWindow):
             n_right = len(right.values) if right else 0
             n = max(n_left, n_right)
             max_col = max(left.max_col if left else 0, right.max_col if right else 0)
+            # 无比较结果时，构建简单的 1:1 列对齐
+            aligned_cols = [
+                ColPair(left_col=c, right_col=c, status="same", label="")
+                for c in range(max_col)
+            ]
             left_indices = [i if i < n_left else None for i in range(n)]
             right_indices = [i if i < n_right else None for i in range(n)]
 
-        self._populate_table(self.left_table, left, left_indices, max_col)
-        self._populate_table(self.right_table, right, right_indices, max_col)
+        self._populate_table(self.left_table, left, left_indices, aligned_cols, "left")
+        self._populate_table(self.right_table, right, right_indices, aligned_cols, "right")
 
     def _populate_table(
         self,
         table: QTableWidget,
         sheet_data: Optional[SheetData],
         row_indices: List[Optional[int]],
-        max_col: int,
+        aligned_cols: List[ColPair],
+        side: str,
     ) -> None:
-        """按给定的源行索引列表填充表格。
+        """按给定的源行索引列表和对齐列填充表格。
 
-        row_indices 中 None 表示该显示行为空（对应侧无此行）。
+        - row_indices 中 None 表示该显示行为虚拟空行（对应侧无此行）。
+        - aligned_cols 描述列对齐：same 列两侧都有值；left_only 列右侧为虚拟空列；
+          right_only 列左侧为虚拟空列。
+        - 虚拟空行/空列创建占位 QTableWidgetItem（文本为空，标记 __virtual__），
+          以便后续 _render_diffs 可对其着色。
         """
-        # 屏蔽信号，避免程序化填充触发 currentItemChanged 等回调
         table.blockSignals(True)
         try:
-            table.setRowCount(0)  # 清空旧内容与旧格式
-            table.setColumnCount(max_col)
+            table.setRowCount(0)
+            n_cols = len(aligned_cols)
+            table.setColumnCount(n_cols)
 
-            # 列头
-            if sheet_data and sheet_data.header_labels:
-                labels = list(sheet_data.header_labels)
-                while len(labels) < max_col:
-                    labels.append("")
-                table.setHorizontalHeaderLabels(labels[:max_col])
-            else:
-                table.setHorizontalHeaderLabels([""] * max_col)
+            # 列头：使用对齐后的列名
+            labels = [cp.label if cp.label else "" for cp in aligned_cols]
+            table.setHorizontalHeaderLabels(labels)
 
             table.setRowCount(len(row_indices))
-            # 行号标签
             table.setVerticalHeaderLabels(
                 [str(i + 1) for i in range(len(row_indices))]
             )
 
             for r, src_idx in enumerate(row_indices):
-                if src_idx is None or sheet_data is None:
-                    continue
-                values = (
-                    sheet_data.values[src_idx]
-                    if src_idx < len(sheet_data.values)
-                    else []
-                )
-                for c in range(max_col):
-                    text = values[c] if c < len(values) else ""
-                    table.setItem(r, c, QTableWidgetItem(text))
+                for c, cp in enumerate(aligned_cols):
+                    # 判断该单元格是否为虚拟空列
+                    if side == "left":
+                        col_idx = cp.left_col
+                    else:
+                        col_idx = cp.right_col
+
+                    if col_idx is None:
+                        # 虚拟空列：该侧无此列
+                        item = QTableWidgetItem("")
+                        item.setData(Qt.ItemDataRole.UserRole, "__virtual__")
+                        table.setItem(r, c, item)
+                        continue
+
+                    # 虚拟空行 或 有数据
+                    if src_idx is not None and sheet_data is not None:
+                        values = (
+                            sheet_data.values[src_idx]
+                            if src_idx < len(sheet_data.values)
+                            else []
+                        )
+                        text = values[col_idx] if col_idx < len(values) else ""
+                        table.setItem(r, c, QTableWidgetItem(text))
+                    else:
+                        # 虚拟空行
+                        item = QTableWidgetItem("")
+                        item.setData(Qt.ItemDataRole.UserRole, "__virtual__")
+                        table.setItem(r, c, item)
 
             table.verticalHeader().setVisible(self.show_row_numbers)
         finally:
@@ -924,31 +946,52 @@ class MainWindow(QMainWindow):
     def _diff_colors(self) -> dict:
         """根据当前主题返回差异配色字典。
 
-        返回键：
-        - diff_row: 不同行的浅红底色
-        - diff_cell: 差异单元格的深红底色
-        - only_row: 单侧独占行的灰色底色
+        配色方案（参考 Beyond Compare）：
+        - diff_row: 不同行的浅红底色（行级标识）
+        - diff_cell: 差异单元格的深红底色（单元格级标识）
+        - left_only_row: 仅左侧有的行的蓝色底色（左侧独占）
+        - left_only_gap: 仅左侧有的行对应的右侧虚拟空行底色（浅蓝灰）
+        - right_only_row: 仅右侧有的行的绿色底色（右侧独占）
+        - right_only_gap: 仅右侧有的行对应的左侧虚拟空行底色（浅绿灰）
+        - left_only_col: 仅左侧有的列的蓝色底色（列级，用于独占列本身）
+        - right_only_col: 仅右侧有的列的绿色底色（列级，用于独占列本身）
+        - col_gap: 虚拟空列底色（独占列的对侧），中性灰
         """
         dark = is_dark_mode()
         if dark:
             return {
                 "diff_row": QColor("#4A2A2A"),
-                "diff_cell": QColor("#8B0000"),
-                "only_row": QColor("#3A3A3A"),
+                "diff_cell": QColor("#B22222"),
+                "left_only_row": QColor("#1A2A4A"),
+                "left_only_gap": QColor("#1E2A38"),
+                "right_only_row": QColor("#1A3A2A"),
+                "right_only_gap": QColor("#1E2E28"),
+                "left_only_col": QColor("#0C447C"),
+                "right_only_col": QColor("#085041"),
+                "col_gap": QColor("#252525"),
             }
         return {
             "diff_row": QColor("#FFE0E0"),
-            "diff_cell": QColor("#FF8888"),
-            "only_row": QColor("#E0E0E0"),
+            "diff_cell": QColor("#FF6B6B"),
+            "left_only_row": QColor("#D6E4FF"),
+            "left_only_gap": QColor("#EEF3FB"),
+            "right_only_row": QColor("#D4F0E0"),
+            "right_only_gap": QColor("#EDF7F1"),
+            "left_only_col": QColor("#85B7EB"),
+            "right_only_col": QColor("#5DCAA5"),
+            "col_gap": QColor("#F0F0F0"),
         }
 
     def _render_diffs(self) -> None:
-        """差异可视化 —— 根据 aligned_rows 为两侧表格着色并应用视图过滤。
+        """差异可视化 - 根据 aligned_rows 和 aligned_cols 为两侧表格着色。
 
-        表格行索引 i 与 aligned_rows[i] 一一对应（由 _refresh_tables 保证）。
-        - 先复位全部背景与行隐藏状态；
-        - 再按状态着色：different 浅红 + 差异列深红；left_only/right_only 灰色；
-        - 视图过滤：被关闭的类别将对应行隐藏。
+        配色策略（颜色鲜明，便于区分）：
+        - different 行：浅红底 + 差异单元格深红
+        - left_only 行：左侧蓝色（独占），右侧浅蓝灰（虚拟空行）
+        - right_only 行：右侧绿色（独占），左侧浅绿灰（虚拟空行）
+        - left_only 列：左侧蓝色（独占），右侧浅灰（虚拟空列）
+        - right_only 列：右侧绿色（独占），左侧浅灰（虚拟空列）
+        - 行级着色覆盖列级着色（行优先），但独占列的虚拟空侧保持 col_gap
         """
         colors = self._diff_colors()
         transparent = QBrush(Qt.transparent)
@@ -968,13 +1011,25 @@ class MainWindow(QMainWindow):
             return
 
         aligned = self.diff_result.aligned_rows
+        aligned_cols = self.diff_result.aligned_cols
         # 视图过滤开关
         show_diff = self.action_show_diff.isChecked()
         show_same = self.action_show_same.isChecked()
         show_left_only = self.action_show_left_only.isChecked()
         show_right_only = self.action_show_right_only.isChecked()
 
-        # 3. 逐行着色 / 过滤
+        # 3. 列级着色：独占列本身 + 虚拟空列
+        for c, cp in enumerate(aligned_cols):
+            if cp.status == "left_only":
+                # 左侧独占列：左侧蓝色，右侧虚拟空列灰色
+                self._paint_col(self.left_table, c, colors["left_only_col"])
+                self._paint_col(self.right_table, c, colors["col_gap"])
+            elif cp.status == "right_only":
+                # 右侧独占列：右侧绿色，左侧虚拟空列灰色
+                self._paint_col(self.right_table, c, colors["right_only_col"])
+                self._paint_col(self.left_table, c, colors["col_gap"])
+
+        # 4. 逐行着色 / 过滤（行级着色覆盖列级，但保留虚拟空侧）
         for i in range(min(n_rows, len(aligned))):
             pair = aligned[i]
             status = pair.status
@@ -993,19 +1048,30 @@ class MainWindow(QMainWindow):
                 self._hide_row_pair(i)
                 continue
 
-            # 着色
+            # 行级着色
             if status == "different":
+                # 浅红底 + 差异单元格深红
                 self._paint_row(self.left_table, i, colors["diff_row"])
                 self._paint_row(self.right_table, i, colors["diff_row"])
-                # 差异单元格深红
+                # 差异单元格深红（覆盖行底色）
                 for c in pair.diff_cells:
                     self._paint_cell(self.left_table, i, c, colors["diff_cell"])
                     self._paint_cell(self.right_table, i, c, colors["diff_cell"])
+                # 独占列的虚拟空侧恢复 col_gap（覆盖行底色）
+                for c, cp in enumerate(aligned_cols):
+                    if cp.status == "left_only":
+                        self._paint_cell(self.right_table, i, c, colors["col_gap"])
+                    elif cp.status == "right_only":
+                        self._paint_cell(self.left_table, i, c, colors["col_gap"])
             elif status == "left_only":
-                self._paint_row(self.left_table, i, colors["only_row"])
+                # 左侧蓝色（独占行），右侧浅蓝灰（虚拟空行）
+                self._paint_row(self.left_table, i, colors["left_only_row"])
+                self._paint_row(self.right_table, i, colors["left_only_gap"])
             elif status == "right_only":
-                self._paint_row(self.right_table, i, colors["only_row"])
-            # same: 不着色
+                # 右侧绿色（独占行），左侧浅绿灰（虚拟空行）
+                self._paint_row(self.right_table, i, colors["right_only_row"])
+                self._paint_row(self.left_table, i, colors["right_only_gap"])
+            # same: 不着色（列级着色保留）
 
         # 同步全局差异缩略图标记
         self._update_birds_eye()
@@ -1013,7 +1079,13 @@ class MainWindow(QMainWindow):
     def _update_birds_eye(self) -> None:
         """根据当前 diff_result 刷新全局差异缩略图的差异行标记。"""
         if self.diff_result:
-            self.diff_birds_eye.set_diff_rows(self.diff_result.diff_row_indices)
+            row_types = [
+                self.diff_result.aligned_rows[i].status
+                for i in self.diff_result.diff_row_indices
+            ]
+            self.diff_birds_eye.set_diff_rows(
+                self.diff_result.diff_row_indices, row_types
+            )
         else:
             self.diff_birds_eye.clear()
 
@@ -1030,6 +1102,14 @@ class MainWindow(QMainWindow):
             if item is not None:
                 item.setBackground(brush)
 
+    def _paint_col(self, table: QTableWidget, col: int, color: QColor) -> None:
+        """为指定列的所有单元格设置背景色（用于虚拟空列）。"""
+        brush = QBrush(color)
+        for r in range(table.rowCount()):
+            item = table.item(r, col)
+            if item is not None:
+                item.setBackground(brush)
+
     def _paint_cell(
         self, table: QTableWidget, row: int, col: int, color: QColor
     ) -> None:
@@ -1039,11 +1119,12 @@ class MainWindow(QMainWindow):
             item.setBackground(QBrush(color))
 
     def _update_stat_labels(self) -> None:
-        """更新状态栏的行/差异数。"""
+        """更新状态栏的行/差异数，按类型分别显示。"""
         if self.diff_result:
             s = self.diff_result.stats
             self.diff_label.setText(
                 f"差异: {s['different'] + s['left_only'] + s['right_only']}"
+                f" (红:{s['different']} 蓝:{s['left_only']} 绿:{s['right_only']})"
             )
         else:
             self.diff_label.setText("差异: 0")
@@ -1470,9 +1551,12 @@ class MainWindow(QMainWindow):
         menu.exec(global_pos)
 
     def _resolve_pair_for_row(self, row: int, quiet: bool = False):
-        """根据 _ctx_table 与指定行解析对齐行，返回 (source, src_idx, target, tgt_idx, side)。
+        """根据 _ctx_table 与指定行解析对齐行，返回 (source, src_idx, target, tgt_idx, side, mode)。
 
-        若该行仅一侧存在或无差异结果，返回 None。
+        - mode="overwrite": target 行已存在，覆盖复制（双侧均有该行）。
+        - mode="insert": target 需在该位置插入新行后复制（用于 left_only/right_only 行，
+          即对侧对应位置是虚拟空行的情况）。tgt_idx 为 target 中 0-based 插入位置。
+        - 无法操作（该侧无数据、无差异结果、行越界）时返回 None。
         quiet=True 时不更新状态栏（用于批量场景静默跳过）。
         """
         if not self.diff_result or row < 0:
@@ -1484,33 +1568,74 @@ class MainWindow(QMainWindow):
                 self.update_status("行索引越界")
             return None
         pair = self.diff_result.aligned_rows[row]
-        if pair.left_row is None or pair.right_row is None:
-            if not quiet:
-                self.update_status("该行仅一侧存在，无法对应复制")
-            return None
+        aligned = self.diff_result.aligned_rows
         is_left = self._ctx_table is self.left_table
+
         if is_left:
+            # 从左侧复制到右侧
+            if pair.left_row is None:
+                # 左侧无数据（right_only 行的左侧空位），无法从空侧复制
+                if not quiet:
+                    self.update_status("该侧无数据，无法复制")
+                return None
+            if pair.right_row is not None:
+                # 双侧都有该行 -> 覆盖
+                return (
+                    self.left_sheet_data,
+                    pair.left_row,
+                    self.right_sheet_data,
+                    pair.right_row,
+                    "right",
+                    "overwrite",
+                )
+            # left_only 行：右侧对应位置是虚拟空行 -> 插入到右侧
+            # 插入位置(0-based) = 前面已存在的右侧行数
+            insert_idx = sum(1 for p in aligned[:row] if p.right_row is not None)
             return (
                 self.left_sheet_data,
                 pair.left_row,
                 self.right_sheet_data,
-                pair.right_row,
+                insert_idx,
                 "right",
+                "insert",
             )
-        return (
-            self.right_sheet_data,
-            pair.right_row,
-            self.left_sheet_data,
-            pair.left_row,
-            "left",
-        )
+        else:
+            # 从右侧复制到左侧
+            if pair.right_row is None:
+                if not quiet:
+                    self.update_status("该侧无数据，无法复制")
+                return None
+            if pair.left_row is not None:
+                return (
+                    self.right_sheet_data,
+                    pair.right_row,
+                    self.left_sheet_data,
+                    pair.left_row,
+                    "left",
+                    "overwrite",
+                )
+            # right_only 行：左侧对应位置是虚拟空行 -> 插入到左侧
+            insert_idx = sum(1 for p in aligned[:row] if p.left_row is not None)
+            return (
+                self.right_sheet_data,
+                pair.right_row,
+                self.left_sheet_data,
+                insert_idx,
+                "left",
+                "insert",
+            )
 
     def _ctx_resolve_pair(self):
         """根据 _ctx_table/_ctx_row 解析当前对齐行（单行场景保留的旧接口）。"""
         return self._resolve_pair_for_row(self._ctx_row)
 
     def _ctx_copy_row(self) -> None:
-        """右键：把选中行整行（值与样式）复制到对侧对应行（支持多选）。"""
+        """右键：把选中行整行（值与样式）复制到对侧对应行（支持多选）。
+
+        - 覆盖模式（双侧都有该行）：直接复制到对侧已存在行。
+        - 插入模式（left_only/right_only 行）：在对侧对应位置插入新行后复制，
+          多个插入按从后往前执行以避免位置偏移。
+        """
         if self._ctx_table is None:
             return
         if not self.diff_result:
@@ -1525,8 +1650,6 @@ class MainWindow(QMainWindow):
             self.update_status("无有效行可复制")
             return
 
-        max_col = self.diff_result.max_col
-
         # 先解析所有可复制行（_post_merge 会清空 diff_result，必须提前收集）
         tasks = []
         skipped = 0
@@ -1538,15 +1661,35 @@ class MainWindow(QMainWindow):
             tasks.append(resolved)
 
         if not tasks:
-            self.update_status("选中行均仅一侧存在，无法对应复制")
+            self.update_status("选中行无有效数据可复制")
             return
 
         side = tasks[0][4]
+        overwrite_tasks = [t for t in tasks if t[5] == "overwrite"]
+        insert_tasks = [t for t in tasks if t[5] == "insert"]
+
         failures = 0
         last_exc: Optional[Exception] = None
-        for source, src_idx, target, tgt_idx, _ in tasks:
+
+        # 先执行覆盖（不改变行数，位置稳定）
+        for source, src_idx, target, tgt_idx, _side, _mode in overwrite_tasks:
             try:
-                ExcelMerger.copy_row_to_other(source, src_idx, target, tgt_idx, max_col)
+                # 使用 source 的实际列数，而非 aligned 列数
+                ExcelMerger.copy_row_to_other(
+                    source, src_idx, target, tgt_idx, source.max_col
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                last_exc = exc
+
+        # 再执行插入（从后往前，避免位置偏移）
+        for source, src_idx, target, tgt_idx, _side, _mode in sorted(
+            insert_tasks, key=lambda t: t[3], reverse=True
+        ):
+            try:
+                ExcelMerger.insert_row_to_other(
+                    source, src_idx, target, tgt_idx, source.max_col
+                )
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 last_exc = exc
@@ -1559,12 +1702,18 @@ class MainWindow(QMainWindow):
 
         self._post_merge(side)
         msg = f"已复制 {len(tasks)} 行到对侧"
+        if insert_tasks:
+            msg += f"（其中 {len(insert_tasks)} 行为新增插入）"
         if skipped:
-            msg += f"（跳过 {skipped} 行仅一侧存在）"
+            msg += f"（跳过 {skipped} 行无数据）"
         self.update_status(msg)
 
     def _ctx_copy_single_cell(self) -> None:
-        """右键：把选中单元格（值与样式）复制到对侧对应位置（支持多选）。"""
+        """右键：把选中单元格（值与样式）复制到对侧对应位置（支持多选）。
+
+        仅处理覆盖模式（双侧都有该行）。插入模式（left_only/right_only 行）
+        不支持单格复制，会跳过并提示。
+        """
         if self._ctx_table is None:
             return
         if not self.diff_result:
@@ -1587,14 +1736,19 @@ class MainWindow(QMainWindow):
             res = self._resolve_pair_for_row(row, quiet=True)
             if res is None:
                 skipped_rows += 1
+            elif res[5] == "insert":
+                # 插入模式（对侧无该行）不支持单格复制，跳过
+                skipped_rows += 1
             else:
                 row_resolved[row] = res
 
         if not row_resolved:
-            self.update_status("选中单元格所在行均仅一侧存在，无法对应复制")
+            self.update_status("选中单元格所在行无有效对应行，无法复制")
             return
 
         side = next(iter(row_resolved.values()))[4]
+        aligned_cols = self.diff_result.aligned_cols
+        is_left = self._ctx_table is self.left_table
         failures = 0
         success = 0
         last_exc: Optional[Exception] = None
@@ -1602,9 +1756,18 @@ class MainWindow(QMainWindow):
             resolved = row_resolved.get(row)
             if resolved is None:
                 continue
-            source, src_idx, target, tgt_idx, _ = resolved
+            source, src_idx, target, tgt_idx, _side, _mode = resolved
+            # col 是 aligned_col 索引，需映射到实际列索引
+            if col >= len(aligned_cols):
+                continue
+            cp = aligned_cols[col]
+            if cp.status != "same":
+                # 虚拟空列不支持单格复制
+                continue
+            src_col = cp.left_col if is_left else cp.right_col
+            tgt_col = cp.right_col if is_left else cp.left_col
             try:
-                ExcelMerger.copy_single_cell(source, src_idx, col, target, tgt_idx)
+                ExcelMerger.copy_single_cell(source, src_idx, src_col, target, tgt_idx)
                 success += 1
             except Exception as exc:  # noqa: BLE001
                 failures += 1
@@ -1619,7 +1782,7 @@ class MainWindow(QMainWindow):
         self._post_merge(side)
         msg = f"已复制 {success} 个单元格到对侧"
         if skipped_rows:
-            msg += f"（跳过 {skipped_rows} 行仅一侧存在）"
+            msg += f"（跳过 {skipped_rows} 行无对应行）"
         self.update_status(msg)
 
     def _ctx_align_rows(self) -> None:

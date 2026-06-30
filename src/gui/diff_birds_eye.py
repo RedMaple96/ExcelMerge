@@ -39,6 +39,7 @@ class DiffBirdsEyeView(QWidget):
         super().__init__(parent)
         self._table = table
         self._diff_rows: list[int] = []
+        self._row_types: list[str] = []
         self._hover_y: Optional[int] = None
         self._marks_pixmap: Optional[QPixmap] = None
         self._marks_dirty: bool = True
@@ -62,15 +63,22 @@ class DiffBirdsEyeView(QWidget):
     # ------------------------------------------------------------------ #
     # 对外接口
     # ------------------------------------------------------------------ #
-    def set_diff_rows(self, rows: list[int]) -> None:
-        """设置差异行索引列表（aligned_rows 下标），触发重绘。"""
+    def set_diff_rows(self, rows: list[int], row_types: Optional[list[str]] = None) -> None:
+        """设置差异行索引列表（aligned_rows 下标），触发重绘。
+
+        row_types: 可选，每行对应的类型 ("different"|"left_only"|"right_only")，
+                   用于缩略图中用不同颜色区分。长度应与 rows 一致。
+                   未提供时全部按 "different" 处理（红色）。
+        """
         self._diff_rows = list(rows)
+        self._row_types = list(row_types) if row_types else ["different"] * len(rows)
         self._marks_dirty = True
         self.update()
 
     def clear(self) -> None:
         """清空差异标记。"""
         self._diff_rows = []
+        self._row_types = []
         self._marks_dirty = True
         self.update()
 
@@ -78,13 +86,21 @@ class DiffBirdsEyeView(QWidget):
     # 主题配色
     # ------------------------------------------------------------------ #
     def _colors(self) -> dict:
-        """根据当前主题返回缩略图配色。"""
+        """根据当前主题返回缩略图配色。
+
+        刻度颜色按差异类型区分（与表格着色一致）：
+        - different: 红色
+        - left_only: 蓝色
+        - right_only: 绿色
+        """
         dark = is_dark_mode()
         if dark:
             return {
                 "bg": QColor("#252525"),
                 "border": QColor("#3a3a3a"),
-                "mark": QColor("#FF5252"),
+                "mark_diff": QColor("#FF5252"),
+                "mark_left": QColor("#5B9BD5"),
+                "mark_right": QColor("#5DCAA5"),
                 "viewport_fill": QColor(255, 255, 255, 30),
                 "viewport_border": QColor(255, 255, 255, 100),
                 "hover": QColor(255, 255, 255, 60),
@@ -92,7 +108,9 @@ class DiffBirdsEyeView(QWidget):
         return {
             "bg": QColor("#fafafa"),
             "border": QColor("#d0d0d0"),
-            "mark": QColor("#E53935"),
+            "mark_diff": QColor("#E53935"),
+            "mark_left": QColor("#185FA5"),
+            "mark_right": QColor("#0F6E56"),
             "viewport_fill": QColor(80, 80, 80, 30),
             "viewport_border": QColor(80, 80, 80, 140),
             "hover": QColor(0, 0, 0, 40),
@@ -102,7 +120,10 @@ class DiffBirdsEyeView(QWidget):
     # 绘制
     # ------------------------------------------------------------------ #
     def _build_marks_pixmap(self, colors: dict) -> Optional[QPixmap]:
-        """将差异刻度条预渲染到 QPixmap（滚动时直接 blit，避免重复绘制）。"""
+        """将差异刻度条预渲染到 QPixmap（滚动时直接 blit，避免重复绘制）。
+
+        按行类型用不同颜色绘制：different=红、left_only=蓝、right_only=绿。
+        """
         total = self._table.rowCount()
         w = self.width()
         h = self.height()
@@ -113,16 +134,23 @@ class DiffBirdsEyeView(QWidget):
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, False)
-        p.setBrush(QBrush(colors["mark"]))
         p.setPen(Qt.NoPen)
         mark_x = 2
         mark_w = w - 4
-        for i in self._diff_rows:
+        for idx, i in enumerate(self._diff_rows):
             if i < 0 or i >= total:
                 continue
+            # 按类型选色
+            rtype = self._row_types[idx] if idx < len(self._row_types) else "different"
+            if rtype == "left_only":
+                p.setBrush(QBrush(colors["mark_left"]))
+            elif rtype == "right_only":
+                p.setBrush(QBrush(colors["mark_right"]))
+            else:
+                p.setBrush(QBrush(colors["mark_diff"]))
             y1 = int(i / total * h)
             y2 = int((i + 1) / total * h)
-            if y2 <= y1:  # 保证至少 1px 高，相邻差异自然合并
+            if y2 <= y1:
                 y2 = y1 + 1
             p.drawRect(QRect(mark_x, y1, mark_w, y2 - y1))
         p.end()

@@ -11,11 +11,11 @@ python -m PyInstaller ^
     --noconfirm ^
     --windowed ^
     --onefile ^
-    --name ExcelCompare ^
+    --name "Excel Merge" ^
     --add-data "src;src" ^
     --hidden-import openpyxl ^
     main.py
 
 echo.
-echo ✅ .exe 构建完成: dist\ExcelCompare.exe
+echo ✅ .exe 构建完成: dist\Excel Merge.exe
 pause

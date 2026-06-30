@@ -35,11 +35,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
-    QSizePolicy,
-    QStyle,
     QTableWidget,
     QTableWidgetItem,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -64,7 +61,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("表格比较 — 无标题")
+        self.setWindowTitle("Excel Merge — 无标题")
         self.resize(1200, 750)
 
         # ---- 共享状态 ----
@@ -98,7 +95,6 @@ class MainWindow(QMainWindow):
         # ---- 构建界面 ----
         self._init_ui()
         self._init_menubar()
-        self._init_toolbar()
         self._init_statusbar()
         self._init_connections()
         self._init_shortcuts()
@@ -299,25 +295,6 @@ class MainWindow(QMainWindow):
         self.action_show_same.toggled.connect(self._on_view_filter_changed)
         m_view.addAction(self.action_show_same)
 
-        self.action_show_left_only = QAction("显示仅左侧", self)
-        self.action_show_left_only.setCheckable(True)
-        self.action_show_left_only.setChecked(True)
-        self.action_show_left_only.toggled.connect(self._on_view_filter_changed)
-        m_view.addAction(self.action_show_left_only)
-
-        self.action_show_right_only = QAction("显示仅右侧", self)
-        self.action_show_right_only.setCheckable(True)
-        self.action_show_right_only.setChecked(True)
-        self.action_show_right_only.toggled.connect(self._on_view_filter_changed)
-        m_view.addAction(self.action_show_right_only)
-
-        # ---- 工具(T) ----
-        m_tools = menubar.addMenu("工具(&T)")
-
-        self.action_file_format = QAction("文件格式", self)
-        self.action_file_format.triggered.connect(self.show_file_format)
-        m_tools.addAction(self.action_file_format)
-
         # ---- 帮助(H) ----
         m_help = menubar.addMenu("帮助(&H)")
 
@@ -328,76 +305,6 @@ class MainWindow(QMainWindow):
         self.action_shortcuts = QAction("快捷键列表", self)
         self.action_shortcuts.triggered.connect(self.show_shortcuts)
         m_help.addAction(self.action_shortcuts)
-
-    # ------------------------------------------------------------------ #
-    # 工具栏
-    # ------------------------------------------------------------------ #
-    def _init_toolbar(self) -> None:
-        """构建水平工具栏：打开左/打开右/保存/交换/上一个差异/下一个差异/统计/列设置/合并。"""
-        self.toolbar = QToolBar("主工具栏", self)
-        self.toolbar.setMovable(False)
-        self.toolbar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        self.addToolBar(self.toolbar)
-
-        style = self.style()
-        icon = lambda sp: style.standardIcon(sp)  # noqa: E731
-
-        self.tb_open_left = self.toolbar.addAction(
-            icon(QStyle.SP_DirOpenIcon), "打开左", self._on_open_left
-        )
-        self.tb_open_right = self.toolbar.addAction(
-            icon(QStyle.SP_DirOpenIcon), "打开右", self._on_open_right
-        )
-        self.tb_save = self.toolbar.addAction(
-            icon(QStyle.SP_DialogSaveButton), "保存", self.save
-        )
-        self.toolbar.addSeparator()
-        self.tb_swap = self.toolbar.addAction(
-            icon(QStyle.SP_BrowserReload), "交换", self.swap_sides
-        )
-        self.tb_prev_diff = self.toolbar.addAction(
-            icon(QStyle.SP_ArrowUp), "上一个差异", self.prev_diff
-        )
-        self.tb_next_diff = self.toolbar.addAction(
-            icon(QStyle.SP_ArrowDown), "下一个差异", self.next_diff
-        )
-        self.toolbar.addSeparator()
-        self.tb_statistics = self.toolbar.addAction(
-            icon(QStyle.SP_FileDialogListView), "统计", self.show_statistics
-        )
-        self.tb_column_settings = self.toolbar.addAction(
-            icon(QStyle.SP_FileDialogDetailedView), "列设置", self.open_column_settings
-        )
-        self.tb_merge = self.toolbar.addAction(
-            icon(QStyle.SP_DialogApplyButton), "合并", self.merge
-        )
-
-        # ---- 过滤器：全部 / 差异 / 相同（核心切换） ----
-        self.toolbar.addSeparator()
-        filter_label = QLabel("过滤器:")
-        self.toolbar.addWidget(filter_label)
-        self.filter_combo = QComboBox(self)
-        self.filter_combo.addItem("全部")
-        self.filter_combo.addItem("差异")
-        self.filter_combo.addItem("相同")
-        self.filter_combo.setToolTip(
-            "全部：显示所有行\n"
-            "差异：只显示有差异的行（隐藏完全相同的行）\n"
-            "相同：只显示完全相同的行"
-        )
-        # 显式设置最小宽度，避免 QToolBar 压缩导致文字截断
-        # 中文字符约 13-14px/字，"全部"2字 + 下拉箭头 + 边距，给足 90px
-        self.filter_combo.setMinimumWidth(90)
-        self.filter_combo.setSizePolicy(
-            QSizePolicy.Minimum, QSizePolicy.Fixed
-        )
-        # 弹出下拉列表宽度与组合框一致
-        self.filter_combo.view().setMinimumWidth(90)
-        self.filter_combo.setCurrentIndex(0)
-        self.filter_combo.currentIndexChanged.connect(
-            self._on_filter_preset_changed
-        )
-        self.toolbar.addWidget(self.filter_combo)
 
     # ------------------------------------------------------------------ #
     # 状态栏
@@ -984,11 +891,9 @@ class MainWindow(QMainWindow):
 
         aligned = self.diff_result.aligned_rows
         aligned_cols = self.diff_result.aligned_cols
-        # 视图过滤开关
+        # 视图过滤开关（仅左/仅右行始终显示）
         show_diff = self.action_show_diff.isChecked()
         show_same = self.action_show_same.isChecked()
-        show_left_only = self.action_show_left_only.isChecked()
-        show_right_only = self.action_show_right_only.isChecked()
 
         # 3. 列级着色：独占列本身 + 虚拟空列
         for c, cp in enumerate(aligned_cols):
@@ -1006,17 +911,11 @@ class MainWindow(QMainWindow):
             pair = aligned[i]
             status = pair.status
 
-            # 行可见性过滤
+            # 行可见性过滤（仅左/仅右行始终显示）
             if status == "different" and not show_diff:
                 self._hide_row_pair(i)
                 continue
             if status == "same" and not show_same:
-                self._hide_row_pair(i)
-                continue
-            if status == "left_only" and not show_left_only:
-                self._hide_row_pair(i)
-                continue
-            if status == "right_only" and not show_right_only:
                 self._hide_row_pair(i)
                 continue
 
@@ -1403,15 +1302,6 @@ class MainWindow(QMainWindow):
         menu.addAction("左覆盖（以左侧为准）", self.merge_left_wins)
         menu.addAction("追加差异行", self.merge_append)
         menu.addAction("手动合并", self.merge_manual)
-
-        btn = self.sender()
-        if isinstance(btn, QAction):
-            # 由工具栏 QAction 触发：在工具栏按钮下方弹出
-            widget = self.toolbar.widgetForAction(btn)
-            if widget is not None:
-                pos = widget.mapToGlobal(widget.rect().bottomLeft())
-                menu.exec(pos)
-                return
         menu.exec(QCursor.pos())
 
     def merge_right_wins(self) -> None:
@@ -2071,56 +1961,8 @@ class MainWindow(QMainWindow):
         self.diff_col_birds_eye.setVisible(checked)
 
     def _on_view_filter_changed(self) -> None:
-        """显示差异/相同/仅左/仅右 过滤变化 —— 触发重渲染（Task 6 实装过滤）。"""
-        self._sync_filter_combo_from_checks()
+        """显示差异/相同 过滤变化 —— 触发重渲染。"""
         self._render_diffs()
-
-    def _on_filter_preset_changed(self, idx: int) -> None:
-        """工具栏过滤器预设切换：根据预设同步 4 个细粒度过滤开关。
-
-        - 全部(0)：4 个开关全开
-        - 差异(1)：显示差异/仅左/仅右，隐藏相同
-        - 相同(2)：仅显示相同，隐藏差异/仅左/仅右
-        """
-        if idx == 0:  # 全部
-            show_diff, show_same, show_left, show_right = True, True, True, True
-        elif idx == 1:  # 差异
-            show_diff, show_same, show_left, show_right = True, False, True, True
-        else:  # 相同
-            show_diff, show_same, show_left, show_right = False, True, False, False
-
-        for act, val in (
-            (self.action_show_diff, show_diff),
-            (self.action_show_same, show_same),
-            (self.action_show_left_only, show_left),
-            (self.action_show_right_only, show_right),
-        ):
-            act.blockSignals(True)
-            act.setChecked(val)
-            act.blockSignals(False)
-        self._render_diffs()
-
-    def _sync_filter_combo_from_checks(self) -> None:
-        """根据 4 个细粒度过滤开关的实际状态，反向同步工具栏过滤器预设。
-
-        状态匹配某预设时同步显示；不匹配时保留当前选择不动，避免误导。
-        """
-        d = self.action_show_diff.isChecked()
-        s = self.action_show_same.isChecked()
-        l = self.action_show_left_only.isChecked()
-        r = self.action_show_right_only.isChecked()
-
-        if d and s and l and r:
-            idx = 0  # 全部
-        elif d and not s and l and r:
-            idx = 1  # 差异
-        elif not d and s and not l and not r:
-            idx = 2  # 相同
-        else:
-            return  # 自定义组合，不更新预设
-        self.filter_combo.blockSignals(True)
-        self.filter_combo.setCurrentIndex(idx)
-        self.filter_combo.blockSignals(False)
 
     def resize_columns(self) -> None:
         """按内容自动调整列宽。"""
@@ -2130,21 +1972,15 @@ class MainWindow(QMainWindow):
             table.horizontalHeader().setStretchLastSection(True)
 
     # ------------------------------------------------------------------ #
-    # 工具 / 帮助
+    # 帮助
     # ------------------------------------------------------------------ #
-    def show_file_format(self) -> None:
-        QMessageBox.information(
-            self, "文件格式",
-            "本工具仅支持 Microsoft Excel 2007+ 的 .xlsx 格式。\n"
-            "旧版 .xls 文件请先在 Excel 中另存为 .xlsx。",
-        )
-
     def about(self) -> None:
         QMessageBox.about(
             self, "关于",
-            "表格比较与合并工具\n\n"
-            "基于 PySide6 + openpyxl 实现 Excel 工作表的智能比较与合并。\n"
-            "支持差异可视化、多策略合并、合并单元格与公式保留。",
+            "Excel Merge\n\n"
+            "支持差异可视化、多策略合并、合并单元格与公式保留。\n\n"
+            "文件格式：仅支持 Microsoft Excel 2007+ 的 .xlsx 格式。\n"
+            "旧版 .xls 文件请先在 Excel 中另存为 .xlsx。",
         )
 
     def show_shortcuts(self) -> None:

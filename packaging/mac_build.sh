@@ -14,20 +14,20 @@ python3 -m PyInstaller \
     --noconfirm \
     --windowed \
     --onefile \
-    --name "ExcelCompare" \
+    --name "Excel Merge" \
     --add-data "src:src" \
     --hidden-import openpyxl \
     main.py
 
-echo "✅ .app 构建完成: dist/ExcelCompare.app (二进制: dist/ExcelCompare)"
+echo "✅ .app 构建完成: dist/Excel Merge.app (二进制: dist/Excel Merge)"
 
 # 如已安装 create-dmg 则生成 DMG
 if command -v create-dmg >/dev/null 2>&1; then
     echo "==> 生成 DMG 安装包..."
-    create-dmg --volname "ExcelCompare" --window-size 600 400 --icon-size 100 \
-        --app-drop-link 425 200 dist/ExcelCompare.dmg dist/ExcelCompare.app 2>/dev/null || \
-    create-dmg --volname "ExcelCompare" dist/ExcelCompare.dmg dist/ExcelCompare.app
-    echo "✅ DMG 构建完成: dist/ExcelCompare.dmg"
+    create-dmg --volname "Excel Merge" --window-size 600 400 --icon-size 100 \
+        --app-drop-link 425 200 "dist/Excel Merge.dmg" "dist/Excel Merge.app" 2>/dev/null || \
+    create-dmg --volname "Excel Merge" "dist/Excel Merge.dmg" "dist/Excel Merge.app"
+    echo "✅ DMG 构建完成: dist/Excel Merge.dmg"
 else
     echo "⚠️  未安装 create-dmg，跳过 DMG 生成。可用 'brew install create-dmg' 安装后重试。"
 fi

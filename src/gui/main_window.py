@@ -251,41 +251,10 @@ class MainWindow(QMainWindow):
         # ---- 编辑(E) ----
         m_edit = menubar.addMenu("编辑(&E)")
 
-        self.action_undo = QAction("撤销", self)
-        self.action_undo.setShortcut(QKeySequence.Undo)
-        self.action_undo.triggered.connect(self.undo)
-        m_edit.addAction(self.action_undo)
-
-        self.action_redo = QAction("重做", self)
-        self.action_redo.setShortcut(QKeySequence.Redo)
-        self.action_redo.triggered.connect(self.redo)
-        m_edit.addAction(self.action_redo)
-
-        m_edit.addSeparator()
-
-        self.action_align_rows = QAction("对齐行", self)
-        self.action_align_rows.triggered.connect(self.align_rows)
-        m_edit.addAction(self.action_align_rows)
-
-        self.action_copy_to_left = QAction("复制到左侧", self)
-        self.action_copy_to_left.triggered.connect(self.copy_to_left)
-        m_edit.addAction(self.action_copy_to_left)
-
-        self.action_copy_to_right = QAction("复制到右侧", self)
-        self.action_copy_to_right.triggered.connect(self.copy_to_right)
-        m_edit.addAction(self.action_copy_to_right)
-
-        m_edit.addSeparator()
-
         self.action_copy_cell = QAction("复制单元格", self)
         self.action_copy_cell.setShortcut(QKeySequence.Copy)
         self.action_copy_cell.triggered.connect(self.copy_cell)
         m_edit.addAction(self.action_copy_cell)
-
-        self.action_paste = QAction("粘贴", self)
-        self.action_paste.setShortcut(QKeySequence.Paste)
-        self.action_paste.triggered.connect(self.paste)
-        m_edit.addAction(self.action_paste)
 
         # ---- 视图(V) ----
         m_view = menubar.addMenu("视图(&V)")
@@ -349,20 +318,12 @@ class MainWindow(QMainWindow):
         self.action_file_format.triggered.connect(self.show_file_format)
         m_tools.addAction(self.action_file_format)
 
-        self.action_options = QAction("选项", self)
-        self.action_options.triggered.connect(self.show_options)
-        m_tools.addAction(self.action_options)
-
         # ---- 帮助(H) ----
         m_help = menubar.addMenu("帮助(&H)")
 
         self.action_about = QAction("关于", self)
         self.action_about.triggered.connect(self.about)
         m_help.addAction(self.action_about)
-
-        self.action_docs = QAction("文档", self)
-        self.action_docs.triggered.connect(self.show_docs)
-        m_help.addAction(self.action_docs)
 
         self.action_shortcuts = QAction("快捷键列表", self)
         self.action_shortcuts.triggered.connect(self.show_shortcuts)
@@ -2023,23 +1984,8 @@ class MainWindow(QMainWindow):
         self._copy_selected_cells(self._ctx_table)
 
     # ------------------------------------------------------------------ #
-    # 编辑类操作（多为桩）
+    # 编辑类操作
     # ------------------------------------------------------------------ #
-    def undo(self) -> None:
-        self.update_status("TODO: 撤销（Task 8/9）")
-
-    def redo(self) -> None:
-        self.update_status("TODO: 重做（Task 8/9）")
-
-    def align_rows(self) -> None:
-        self.update_status("TODO: 对齐行（Task 8）")
-
-    def copy_to_left(self) -> None:
-        self.update_status("TODO: 复制到左侧（Task 8）")
-
-    def copy_to_right(self) -> None:
-        self.update_status("TODO: 复制到右侧（Task 8）")
-
     def copy_cell(self) -> None:
         """复制选中单元格到剪贴板（支持多选）。
 
@@ -2107,9 +2053,6 @@ class MainWindow(QMainWindow):
                 f"已复制 {count} 个单元格 ({max_row - min_row + 1}行 × "
                 f"{max_col - min_col + 1}列)"
             )
-
-    def paste(self) -> None:
-        self.update_status("TODO: 粘贴（Task 8）")
 
     # ------------------------------------------------------------------ #
     # 视图类操作
@@ -2196,9 +2139,6 @@ class MainWindow(QMainWindow):
             "旧版 .xls 文件请先在 Excel 中另存为 .xlsx。",
         )
 
-    def show_options(self) -> None:
-        self.update_status("TODO: 选项")
-
     def about(self) -> None:
         QMessageBox.about(
             self, "关于",
@@ -2206,9 +2146,6 @@ class MainWindow(QMainWindow):
             "基于 PySide6 + openpyxl 实现 Excel 工作表的智能比较与合并。\n"
             "支持差异可视化、多策略合并、合并单元格与公式保留。",
         )
-
-    def show_docs(self) -> None:
-        self.update_status("TODO: 文档")
 
     def show_shortcuts(self) -> None:
         QMessageBox.information(
@@ -2219,10 +2156,9 @@ class MainWindow(QMainWindow):
             "另存为: Ctrl+Shift+S\n"
             "交换左右: Ctrl+Shift+X\n"
             "重新比较: F5\n"
-            "撤销: Cmd/Ctrl+Z\n"
-            "重做: Cmd/Ctrl+Shift+Z\n"
             "复制单元格: Cmd/Ctrl+C\n"
-            "粘贴: Cmd/Ctrl+V",
+            "下一个差异: Ctrl+Down\n"
+            "上一个差异: Ctrl+Up",
         )
 
     # ------------------------------------------------------------------ #

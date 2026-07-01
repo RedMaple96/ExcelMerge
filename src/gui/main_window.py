@@ -90,7 +90,6 @@ class MainWindow(QMainWindow):
         # 按侧别(left/right)跟踪脏状态与备份状态
         self._dirty = {"left": False, "right": False}  # 是否有未保存的修改
         self._backup_done = {"left": True, "right": True}  # 当前脏状态是否已备份
-        self._last_backup_path = {"left": None, "right": None}  # 最近一次备份路径
         # 右键菜单上下文（由 on_context_menu 填充，_ctx_* 回调读取）
         self._ctx_table: Optional[QTableWidget] = None
         self._ctx_aligned_idx: int = -1  # 对齐行索引（aligned_rows 下标）
@@ -389,7 +388,7 @@ class MainWindow(QMainWindow):
     # 状态栏
     # ------------------------------------------------------------------ #
     def _init_statusbar(self) -> None:
-        """构建状态栏：就绪标签 + 行信息 + 差异数 + 备份状态 + 进度条。"""
+        """构建状态栏：就绪标签 + 行信息 + 差异数 + 进度条。"""
         bar = self.statusBar()
 
         self.status_label = QLabel("就绪")
@@ -400,9 +399,6 @@ class MainWindow(QMainWindow):
 
         self.diff_label = QLabel("差异: 0")
         bar.addPermanentWidget(self.diff_label)
-
-        self.backup_label = QLabel("备份: 左:无 | 右:无")
-        bar.addPermanentWidget(self.backup_label)
 
         # 比较进度条（默认隐藏，比较期间显示）
         self.progress_bar = QProgressBar()
@@ -609,6 +605,8 @@ class MainWindow(QMainWindow):
 
     def reload_files(self) -> None:
         """重载左右两侧已打开的文件。"""
+        if not self._check_unsaved_before_switch():
+            return
         if self.left_path:
             self.load_file("left", self.left_path)
         if self.right_path:
@@ -678,8 +676,90 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Sheet 切换 / 表格渲染 / 比较
     # ------------------------------------------------------------------ #
+    def _check_unsaved_before_switch(self) -> bool:
+        """切换 Sheet 前检查是否有未保存的修改。
+
+        - 任一侧脏时弹询问框：保存 / 不保存 / 取消
+        - 保存：保存所有脏侧后从磁盘重载，确保数据一致
+        - 不保存：从磁盘重载丢弃内存中的修改
+        - 取消：返回 False，调用方应中止切换并恢复原选中项
+        """
+        dirty_sides = [s for s in ("left", "right") if self._dirty[s]]
+        if not dirty_sides:
+            return True
+        btn = QMessageBox.question(
+            self, "未保存的修改",
+            "当前 Sheet 有未保存的修改，是否保存？",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if btn == QMessageBox.Cancel:
+            return False
+        if btn == QMessageBox.Save:
+            for s in dirty_sides:
+                self._save_side(s, quiet=True)
+        # 保存或丢弃后均从磁盘重载，确保切换后是最新数据
+        for s in dirty_sides:
+            self._reload_workbook(s)
+        return True
+
+    def _reload_workbook(self, side: str) -> None:
+        """从磁盘重新加载指定侧工作簿（用于保存后或丢弃修改后恢复最新数据）。
+
+        重载 wb 与 wb_cached，刷新 Sheet 下拉（保留当前选中），
+        复位脏标记。不触发 _on_sheet_changed（由调用方后续加载目标 sheet）。
+        """
+        path = self.left_path if side == "left" else self.right_path
+        if not path:
+            return
+        try:
+            wb = ExcelLoader.load_workbook(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "重载失败", f"重新加载文件失败:\n{path}\n\n{exc}")
+            return
+        try:
+            wb_cached = ExcelLoader.load_workbook_cached(path)
+        except Exception:  # noqa: BLE001
+            wb_cached = None
+
+        sheet_names = ExcelLoader.get_sheet_names(wb)
+        combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
+        cur_name = combo.currentText()
+
+        if side == "left":
+            self.left_wb = wb
+            self.left_wb_cached = wb_cached
+        else:
+            self.right_wb = wb
+            self.right_wb_cached = wb_cached
+
+        # 刷新下拉（保留当前选中，若新工作簿中仍有该 sheet）
+        combo.blockSignals(True)
+        combo.clear()
+        for name in sheet_names:
+            combo.addItem(name)
+        idx = combo.findText(cur_name)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        elif sheet_names:
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+        self._dirty[side] = False
+        self._backup_done[side] = True
+
     def _on_sheet_changed(self, side: str) -> None:
         """下拉切换 Sheet：提取 SheetData -> 刷新表格 -> 触发比较。"""
+        if not self._check_unsaved_before_switch():
+            # 用户取消：恢复下拉到当前 sheet
+            combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
+            cur = self.left_sheet_name if side == "left" else self.right_sheet_name
+            idx = combo.findText(cur)
+            if idx >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+            return
         combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
         if combo.count() == 0:
             return
@@ -729,6 +809,12 @@ class MainWindow(QMainWindow):
 
     def _switch_to_sheet(self, name: str) -> None:
         """从底部标签栏切换两侧到同一 Sheet（屏蔽下拉信号避免重复比较）。"""
+        if not self._check_unsaved_before_switch():
+            # 用户取消：恢复底部激活标签到当前 sheet
+            cur = self.left_sheet_name or self.right_sheet_name
+            if cur:
+                self.bottom_bar.set_active(cur)
+            return
         self.left_sheet_combo.blockSignals(True)
         self.right_sheet_combo.blockSignals(True)
         try:
@@ -844,10 +930,14 @@ class MainWindow(QMainWindow):
                         if sheet_data.cached_values is None:
                             text = formula
                         else:
-                            # 默认显示文本值；same 列且两侧文本值一致、
-                            # 公式不同时显示公式
+                            # 默认显示文本值
                             text = cached
-                            if (
+                            # 缓存值为空但有公式（合并保存后公式未计算）：
+                            # 回退显示公式，避免显示空值
+                            if cached == "" and formula != "":
+                                text = formula
+                            # same 列且两侧文本值一致、公式不同时显示公式
+                            elif (
                                 cp.status == "same"
                                 and other_sheet_data is not None
                                 and other_row_indices is not None
@@ -1251,7 +1341,6 @@ class MainWindow(QMainWindow):
         # 复位该侧脏标记
         self._dirty[side] = False
         self._backup_done[side] = True
-        self._refresh_backup_label()
         msg = f"{side_label}已保存"
         if not quiet:
             self.update_status(msg)
@@ -1312,29 +1401,11 @@ class MainWindow(QMainWindow):
             )
             shutil.copy2(path, backup_path)
             self._backup_done[side] = True
-            self._last_backup_path[side] = backup_path
-            self._refresh_backup_label()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
                 self, "备份失败",
                 f"创建备份失败，保存将继续:\n{exc}",
             )
-
-    def _refresh_backup_label(self) -> None:
-        """根据两侧备份状态刷新底部备份标签。
-
-        显示规则：任一侧有待保存脏状态 -> "备份: 待保存"；
-        否则汇总两侧最近备份文件名（无则"无"）。
-        """
-        if not self._backup_done["left"] or not self._backup_done["right"]:
-            self.backup_label.setText("备份: 待保存")
-            return
-        parts = []
-        for side, label in (("left", "左"), ("right", "右")):
-            bp = self._last_backup_path[side]
-            name = os.path.basename(bp) if bp else "无"
-            parts.append(f"{label}:{name}")
-        self.backup_label.setText("备份: " + " | ".join(parts))
 
     def _verify_integrity(self, path: str) -> bool:
         """保存后完整性校验：重新加载文件确认未损坏（FR-05 可靠性）。
@@ -1370,8 +1441,6 @@ class MainWindow(QMainWindow):
             )
             shutil.copy2(path, backup_path)
             self._backup_done[side] = True
-            self._last_backup_path[side] = backup_path
-            self._refresh_backup_label()
             self.update_status(f"已创建备份 {backup_path}")
         except Exception as exc:  # noqa: BLE001
             # 备份失败不阻断合并，仅提示
@@ -1622,7 +1691,6 @@ class MainWindow(QMainWindow):
         self._run_compare()
         self._dirty[side] = True
         self._backup_done[side] = False
-        self._refresh_backup_label()
         # 合并后重新计算各 sheet 差异红点（可能当前 sheet 差异已消除）
         if self.left_wb and self.right_wb:
             self._compute_sheet_diff_summary()
@@ -2355,7 +2423,6 @@ class MainWindow(QMainWindow):
         if renamed_right:
             self._dirty["right"] = True
             self._backup_done["right"] = False
-        self._refresh_backup_label()
         self.update_status(f"已重命名: {old_name} → {new_name}（仅本地）")
 
     def _on_tab_sheet_closed(self, name: str, close_others: bool) -> None:

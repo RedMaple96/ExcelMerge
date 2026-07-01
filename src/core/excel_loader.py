@@ -199,7 +199,17 @@ class ExcelLoader:
 
     @staticmethod
     def save_workbook(wb: Workbook, path: str) -> None:
-        """保存工作簿到指定路径。"""
+        """保存工作簿到指定路径。
+
+        保存前设置 fullCalcOnLoad=True，使 Excel/WPS 打开时强制重算公式，
+        避免合并后公式缓存值过期导致显示旧结果。
+        """
+        try:
+            # openpyxl 较新版本通过 wb.calculation.fullCalcOnLoad 控制
+            wb.calculation.fullCalcOnLoad = True
+        except Exception:  # noqa: BLE001
+            # 旧版 openpyxl 无此属性时忽略，不影响保存
+            pass
         wb.save(path)
 
     @staticmethod

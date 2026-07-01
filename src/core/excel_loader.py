@@ -7,9 +7,14 @@
 
 from __future__ import annotations
 
+import os
+import re
+import shutil
+import tempfile
+import zipfile
 from copy import copy
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
@@ -198,19 +203,235 @@ class ExcelLoader:
         return str(value)
 
     @staticmethod
-    def save_workbook(wb: Workbook, path: str) -> None:
-        """保存工作簿到指定路径。
+    def copy_cell_value(
+        src_cell, tgt_cell, cached_value: Optional[str] = None
+    ) -> None:
+        """复制单元格值（公式 + 缓存值）。
 
-        保存前设置 fullCalcOnLoad=True，使 Excel/WPS 打开时强制重算公式，
-        避免合并后公式缓存值过期导致显示旧结果。
+        - 普通公式（以 "=" 开头的字符串）原样写入，openpyxl 自动识别为公式。
+        - 数组公式（ArrayFormula 对象）：提取其 text（公式文本）以普通公式
+          字符串写入目标单元格，避免直接赋值对象导致 ref 仍指向源位置、
+          目标单元格引用错误。
+        - 其它值（含 None）直接写入。
+        - cached_value：源单元格的缓存计算值（来自 data_only=True 副本）。
+          写入工作簿的 _pending_cached_values，按 {sheet_name: {coord: value}} 结构存储，
+          保存时注入 XML 的 <v> 标签。
+        """
+        value = src_cell.value
+        # ArrayFormula 等公式对象：取 text 属性以普通公式字符串写入
+        text = getattr(value, "text", None)
+        if text is not None:
+            tgt_cell.value = text
+        else:
+            tgt_cell.value = value
+
+        # 记录缓存值，保存时注入 XML
+        if cached_value is not None:
+            wb = tgt_cell.parent.parent if tgt_cell.parent else None
+            ws_name = tgt_cell.parent.title if tgt_cell.parent else None
+            if wb is not None and ws_name:
+                if not hasattr(wb, "_pending_cached_values"):
+                    wb._pending_cached_values = {}  # type: ignore[attr-defined]
+                if ws_name not in wb._pending_cached_values:
+                    wb._pending_cached_values[ws_name] = {}  # type: ignore[attr-defined]
+                wb._pending_cached_values[ws_name][tgt_cell.coordinate] = cached_value  # type: ignore[attr-defined]
+
+    @staticmethod
+    def save_workbook(wb: Workbook, path: str) -> None:
+        """保存工作簿到指定路径，并注入缓存计算值到公式单元格。
+
+        - 先用 openpyxl 保存到临时文件
+        - 解析 workbook.xml 建立 sheet_name -> sheet_xml_path 映射
+        - 扫描每个 sheet XML，为有缓存值的公式单元格替换/插入 <v> 标签
+        - 移动到目标路径
+        - fullCalcOnLoad 设为 False（保留缓存值，不强制重算）
         """
         try:
-            # openpyxl 较新版本通过 wb.calculation.fullCalcOnLoad 控制
-            wb.calculation.fullCalcOnLoad = True
+            wb.calculation.fullCalcOnLoad = False
         except Exception:  # noqa: BLE001
-            # 旧版 openpyxl 无此属性时忽略，不影响保存
             pass
-        wb.save(path)
+
+        cached_values: Dict[str, Dict[str, str]] = getattr(
+            wb, "_pending_cached_values", {}
+        )
+
+        if not cached_values:
+            wb.save(path)
+            return
+
+        # 保存到临时文件，再注入缓存值后写到目标路径
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix=".xlsx", prefix="excelmerge_"
+        )
+        os.close(tmp_fd)
+        try:
+            wb.save(tmp_path)
+            ExcelLoader._inject_cached_values(tmp_path, path, cached_values)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @staticmethod
+    def _get_sheet_xml_mapping(
+        zin: zipfile.ZipFile,
+    ) -> Dict[str, str]:
+        """解析 workbook.xml 和 workbook.xml.rels，返回 {sheet_name: xml_path} 映射。
+
+        xlsx 内部结构:
+        - xl/workbook.xml 的 <sheets><sheet name="..." r:id="rIdX"/></sheets>
+        - xl/_rels/workbook.xml.rels 的 <Relationship Id="rIdX" Target="worksheets/sheetN.xml"/>
+        """
+        sheet_name_to_rid: Dict[str, str] = {}
+        rid_to_target: Dict[str, str] = {}
+
+        # 解析 workbook.xml 获取 sheet_name -> rId
+        try:
+            wb_xml = zin.read("xl/workbook.xml").decode("utf-8")
+            # 匹配所有 <sheet ...> 或 <sheet .../> 标签
+            for m in re.finditer(r'<sheet\s[^>]*?/?>', wb_xml):
+                tag = m.group(0)
+                name_match = re.search(r'name="([^"]+)"', tag)
+                rid_match = re.search(r'r:id="([^"]+)"', tag)
+                if name_match and rid_match:
+                    sheet_name_to_rid[name_match.group(1)] = rid_match.group(1)
+        except Exception:
+            return {}
+
+        # 解析 workbook.xml.rels 获取 rId -> Target
+        try:
+            rels_xml = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+            # 匹配所有 <Relationship ...> 或 <Relationship .../> 标签
+            for m in re.finditer(r'<Relationship\s[^>]*?/?>', rels_xml):
+                tag = m.group(0)
+                id_match = re.search(r'Id="([^"]+)"', tag)
+                target_match = re.search(r'Target="([^"]+)"', tag)
+                if not id_match or not target_match:
+                    continue
+                rid = id_match.group(1)
+                target = target_match.group(1)
+                # Target 可能是 "/xl/worksheets/sheet1.xml"（绝对路径）或
+                # "worksheets/sheet1.xml"（相对于 xl/ 的路径）
+                # 统一去掉前导 / 前缀
+                if target.startswith("/"):
+                    target = target[1:]
+                # 如果不是以 xl/ 开头，加上 xl/ 前缀（相对于 xl/ 的路径）
+                if not target.startswith("xl/"):
+                    target = "xl/" + target
+                rid_to_target[rid] = target
+        except Exception:
+            return {}
+
+        # 组装 sheet_name -> xml_path
+        mapping: Dict[str, str] = {}
+        for name, rid in sheet_name_to_rid.items():
+            if rid in rid_to_target:
+                mapping[name] = rid_to_target[rid]
+        return mapping
+
+    @staticmethod
+    def _inject_cached_values(
+        src_path: str, dst_path: str, cached_values: Dict[str, Dict[str, str]]
+    ) -> None:
+        """注入缓存计算值到 xlsx 文件的公式单元格 XML。
+
+        - cached_values 格式: {sheet_name: {coordinate: cached_value}}
+        - 解析 sheet 名与 XML 路径映射后，对每个 sheet 分别注入对应缓存值。
+        - 若无法解析映射（异常情况），退化为兼容旧逻辑：对所有 sheet XML 用全部缓存值注入
+          （单 sheet 文件可正常工作）。
+        """
+        with zipfile.ZipFile(src_path, "r") as zin:
+            sheet_mapping = ExcelLoader._get_sheet_xml_mapping(zin)
+
+            with zipfile.ZipFile(dst_path, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    is_sheet_xml = (
+                        item.filename.startswith("xl/worksheets/sheet")
+                        and item.filename.endswith(".xml")
+                    )
+                    if is_sheet_xml:
+                        xml = data.decode("utf-8")
+                        # 找到该 XML 对应的 sheet 名
+                        target_sheet = None
+                        for name, xml_path in sheet_mapping.items():
+                            if xml_path == item.filename:
+                                target_sheet = name
+                                break
+                        if target_sheet and target_sheet in cached_values:
+                            value_map = cached_values[target_sheet]
+                            xml = ExcelLoader._inject_xml_cached_values(
+                                xml, value_map
+                            )
+                        elif not sheet_mapping:
+                            # 无法解析映射时的兼容回退：单sheet场景下把所有缓存值都尝试注入
+                            for vmap in cached_values.values():
+                                xml = ExcelLoader._inject_xml_cached_values(
+                                    xml, vmap
+                                )
+                        data = xml.encode("utf-8")
+                    zout.writestr(item, data)
+
+    @staticmethod
+    def _inject_xml_cached_values(
+        xml: str, value_map: Dict[str, str]
+    ) -> str:
+        """注入缓存值到单个 sheet XML。
+
+        匹配公式单元格 <c ...><f...>...</f>...<v.../></c> 或 <c ...><f...>...</f>...<v>...</v></c>，
+        将 <v> 替换为对应缓存值；若无 <v> 则插入。正确处理 openpyxl 生成的自闭合 <v />。
+        """
+        # 匹配c标签，支持 r 属性不在第一个位置，支持自闭合<v/>
+        pattern = re.compile(
+            r'<c\s(?P<attrs>[^>]*\br="(?P<ref>[A-Z]+\d+)"[^>]*)>'
+            r'(?P<inner>.*?)</c>',
+            re.DOTALL
+        )
+
+        def replacer(m: re.Match) -> str:
+            ref = m.group("ref")
+            if ref not in value_map:
+                return m.group(0)
+            attrs = m.group("attrs")
+            inner = m.group("inner")
+            cached = value_map[ref]
+
+            # 必须是公式单元格（包含 <f 标签）
+            if "<f" not in inner:
+                return m.group(0)
+
+            # 移除所有现有的 v 标签（包括自闭合 <v/> 和成对 <v>...</v>）
+            inner = re.sub(r'<v\s[^>]*/>', '', inner)
+            inner = re.sub(r'<v[^>]*/>', '', inner)
+            inner = re.sub(r'<v[^>]*>[^<]*</v>', '', inner)
+
+            # 判断是否为字符串结果
+            is_str = not (
+                cached.lstrip("-").replace(".", "", 1).isdigit()
+            )
+
+            # 处理 <c> 标签上的 t 属性
+            if is_str:
+                if 't="' in attrs:
+                    attrs = re.sub(r't="[^"]*"', 't="str"', attrs)
+                else:
+                    attrs = attrs + ' t="str"'
+            else:
+                attrs = re.sub(r'\s*t="[^"]*"', '', attrs)
+
+            # 在 </f> 后面插入新的 <v> 标签
+            new_v = f"<v>{cached}</v>"
+            # 找到 </f> 的位置，在其后插入
+            f_close_match = re.search(r'</f\s*>', inner)
+            if f_close_match:
+                insert_pos = f_close_match.end()
+                inner = inner[:insert_pos] + new_v + inner[insert_pos:]
+            else:
+                # 找不到 </f>，追加到 inner 末尾（不应该发生，但防御性处理）
+                inner = inner + new_v
+
+            return f"<c {attrs}>{inner}</c>"
+
+        return pattern.sub(replacer, xml)
 
     @staticmethod
     def copy_cell_style(src_cell, tgt_cell) -> None:
@@ -224,21 +445,3 @@ class ExcelLoader:
         tgt_cell.border = copy(src_cell.border)
         tgt_cell.alignment = copy(src_cell.alignment)
         tgt_cell.number_format = src_cell.number_format
-
-    @staticmethod
-    def copy_cell_value(src_cell, tgt_cell) -> None:
-        """复制单元格值。
-
-        - 普通公式（以 "=" 开头的字符串）原样写入，openpyxl 自动识别为公式。
-        - 数组公式（ArrayFormula 对象）：提取其 text（公式文本）以普通公式
-          字符串写入目标单元格，避免直接赋值对象导致 ref 仍指向源位置、
-          目标单元格引用错误。
-        - 其它值（含 None）直接写入。
-        """
-        value = src_cell.value
-        # ArrayFormula 等公式对象：取 text 属性以普通公式字符串写入
-        text = getattr(value, "text", None)
-        if text is not None:
-            tgt_cell.value = text
-        else:
-            tgt_cell.value = value

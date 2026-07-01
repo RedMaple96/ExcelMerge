@@ -930,14 +930,10 @@ class MainWindow(QMainWindow):
                         if sheet_data.cached_values is None:
                             text = formula
                         else:
-                            # 默认显示文本值
+                            # 默认显示文本值；same 列且两侧文本值一致、
+                            # 公式不同时显示公式
                             text = cached
-                            # 缓存值为空但有公式（合并保存后公式未计算）：
-                            # 回退显示公式，避免显示空值
-                            if cached == "" and formula != "":
-                                text = formula
-                            # same 列且两侧文本值一致、公式不同时显示公式
-                            elif (
+                            if (
                                 cp.status == "same"
                                 and other_sheet_data is not None
                                 and other_row_indices is not None

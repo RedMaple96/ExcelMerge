@@ -25,6 +25,27 @@ class ExcelMerger:
     """
 
     @staticmethod
+    def _get_cached(
+        sheet_data: SheetData, src_row: int, col: int
+    ) -> Optional[str]:
+        """安全获取 sheet_data.cached_values 中指定单元格的缓存值。
+
+        无 cached_values 或越界时返回 None。
+        """
+        if (
+            sheet_data.cached_values is None
+            or src_row is None
+            or col is None
+            or src_row >= len(sheet_data.cached_values)
+        ):
+            return None
+        row = sheet_data.cached_values[src_row]
+        if col >= len(row):
+            return None
+        v = row[col]
+        return v if v != "" else None
+
+    @staticmethod
     def merge_right_to_left(
         diff_result: DiffResult, left: SheetData, right: SheetData
     ) -> None:
@@ -56,7 +77,10 @@ class ExcelMerger:
                     tgt_cell = left.worksheet.cell(
                         row=left_ws_row, column=cp.left_col + 1
                     )
-                    ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                    cached = ExcelMerger._get_cached(
+                        right, pair.right_row, cp.right_col
+                    )
+                    ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                     ExcelLoader.copy_cell_style(src_cell, tgt_cell)
             elif pair.status == "right_only":
                 insert_idx = sum(
@@ -100,7 +124,10 @@ class ExcelMerger:
                     tgt_cell = right.worksheet.cell(
                         row=right_ws_row, column=cp.right_col + 1
                     )
-                    ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                    cached = ExcelMerger._get_cached(
+                        left, pair.left_row, cp.left_col
+                    )
+                    ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                     ExcelLoader.copy_cell_style(src_cell, tgt_cell)
             elif pair.status == "left_only":
                 insert_idx = sum(
@@ -152,14 +179,16 @@ class ExcelMerger:
             for src_col, tgt_col in col_mapping:
                 src_cell = source.worksheet.cell(row=src_ws_row, column=src_col + 1)
                 tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=tgt_col + 1)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, source_row_idx, src_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
         else:
             for col in range(max_col):
                 ws_col = col + 1
                 src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
                 tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=ws_col)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, source_row_idx, col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
     @staticmethod
@@ -192,14 +221,16 @@ class ExcelMerger:
             for src_col, tgt_col in col_mapping:
                 src_cell = source.worksheet.cell(row=src_ws_row, column=src_col + 1)
                 tgt_cell = target.worksheet.cell(row=insert_ws_row, column=tgt_col + 1)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, source_row_idx, src_col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
         else:
             for col in range(max_col):
                 ws_col = col + 1
                 src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
                 tgt_cell = target.worksheet.cell(row=insert_ws_row, column=ws_col)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, source_row_idx, col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
         # 重建以源行为左上角的合并区域
@@ -232,7 +263,8 @@ class ExcelMerger:
         """逐项手动合并：把 source 单个单元格(0-based row, 0-based col)值与样式复制到 target 对应位置。"""
         src_cell = source.worksheet.cell(row=source_row_idx + 1, column=col_idx + 1)
         tgt_cell = target.worksheet.cell(row=target_row_idx + 1, column=col_idx + 1)
-        ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+        cached = ExcelMerger._get_cached(source, source_row_idx, col_idx)
+        ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
         ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
     @staticmethod
@@ -257,14 +289,16 @@ class ExcelMerger:
             for src_row, tgt_row in row_mapping:
                 src_cell = source.worksheet.cell(row=src_row + 1, column=src_ws_col)
                 tgt_cell = target.worksheet.cell(row=tgt_row + 1, column=tgt_ws_col)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, src_row, source_col_idx)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
         else:
             for row in range(max_row):
                 ws_row = row + 1
                 src_cell = source.worksheet.cell(row=ws_row, column=src_ws_col)
                 tgt_cell = target.worksheet.cell(row=ws_row, column=tgt_ws_col)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, row, source_col_idx)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
     @staticmethod
@@ -297,14 +331,16 @@ class ExcelMerger:
             for src_row, tgt_row in row_mapping:
                 src_cell = source.worksheet.cell(row=src_row + 1, column=src_ws_col)
                 tgt_cell = target.worksheet.cell(row=tgt_row + 1, column=insert_ws_col)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, src_row, source_col_idx)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
         else:
             for row in range(max_row):
                 ws_row = row + 1
                 src_cell = source.worksheet.cell(row=ws_row, column=src_ws_col)
                 tgt_cell = target.worksheet.cell(row=ws_row, column=insert_ws_col)
-                ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+                cached = ExcelMerger._get_cached(source, row, source_col_idx)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
         # 重建以源列为左上角的合并区域
@@ -363,7 +399,8 @@ class ExcelMerger:
             ws_col = col + 1
             src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
             tgt_cell = target.worksheet.cell(row=append_row, column=ws_col)
-            ExcelLoader.copy_cell_value(src_cell, tgt_cell)
+            cached = ExcelMerger._get_cached(source, source_row_idx, col)
+            ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
             ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
         # 重建以源行为左上角的合并区域

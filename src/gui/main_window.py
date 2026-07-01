@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -86,9 +87,10 @@ class MainWindow(QMainWindow):
         self._sync_scroll_blocked: bool = False  # 同步滚动防递归守卫
         self._current_diff_pos: int = -1  # 差异导航游标（指向 diff_row_indices）
         self._compare_worker: Optional[CompareWorker] = None  # 比较后台线程
-        self._dirty: bool = False  # 是否有未保存的修改（合并后置 True）
-        self._backup_done: bool = True  # 当前脏状态是否已备份；初始无需备份
-        self._last_backup_path: Optional[str] = None  # 最近一次备份路径
+        # 按侧别(left/right)跟踪脏状态与备份状态
+        self._dirty = {"left": False, "right": False}  # 是否有未保存的修改
+        self._backup_done = {"left": True, "right": True}  # 当前脏状态是否已备份
+        self._last_backup_path = {"left": None, "right": None}  # 最近一次备份路径
         # 右键菜单上下文（由 on_context_menu 填充，_ctx_* 回调读取）
         self._ctx_table: Optional[QTableWidget] = None
         self._ctx_aligned_idx: int = -1  # 对齐行索引（aligned_rows 下标）
@@ -399,7 +401,7 @@ class MainWindow(QMainWindow):
         self.diff_label = QLabel("差异: 0")
         bar.addPermanentWidget(self.diff_label)
 
-        self.backup_label = QLabel("备份: 无")
+        self.backup_label = QLabel("备份: 左:无 | 右:无")
         bar.addPermanentWidget(self.backup_label)
 
         # 比较进度条（默认隐藏，比较期间显示）
@@ -1178,44 +1180,91 @@ class MainWindow(QMainWindow):
     # 保存与备份（Task 9 实装）
     # ------------------------------------------------------------------ #
     def save(self) -> None:
-        """保存左侧工作簿（目标文件 A）到原路径，并做完整性校验。
+        """保存工作簿到原路径。
 
-        流程：备份（若有未保存修改且尚未备份）-> 保存 -> 完整性校验 -> 复位脏标记。
+        弹出选择对话框让用户选择保存左侧 / 右侧 / 全部。
+        对所选侧别：无未保存修改时仅提示不保存；有修改时执行
+        备份 -> 保存 -> 完整性校验 -> 复位脏标记。
         """
-        if not (self.left_wb and self.left_path):
+        # 两侧均无可保存的工作簿
+        if not (self.left_wb or self.right_wb):
             QMessageBox.warning(self, "无可保存", "无可保存的文件")
             return
-        if not self._dirty:
-            self.update_status("无未保存更改")
-        # FR-05-03：保存前自动备份原始文件（仅当有未保存修改且尚未备份时）
-        self._backup_if_needed()
-        try:
-            ExcelLoader.save_workbook(self.left_wb, self.left_path)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self, "保存失败", f"保存文件失败:\n{self.left_path}\n\n{exc}"
-            )
+
+        items = ["保存左侧", "保存右侧", "保存全部"]
+        choice, ok = QInputDialog.getItem(
+            self, "保存", "选择保存范围", items, 0, False
+        )
+        if not ok:
             return
+
+        if choice == "保存左侧":
+            self._save_side("left")
+        elif choice == "保存右侧":
+            self._save_side("right")
+        else:  # 保存全部
+            left_msg = self._save_side("left", quiet=True)
+            right_msg = self._save_side("right", quiet=True)
+            # 汇总两侧结果
+            self.update_status(f"左侧: {left_msg}；右侧: {right_msg}")
+
+    def _save_side(self, side: str, quiet: bool = False) -> str:
+        """保存指定侧工作簿到原路径。
+
+        - side: "left" 或 "right"
+        - 无未保存修改（_dirty[side] 为 False）时仅提示不保存，返回提示文本
+        - 有修改时：备份 -> 保存 -> 完整性校验 -> 复位脏标记
+        - quiet=True 时不弹独立提示框，仅返回结果文本（用于"保存全部"汇总）
+        - 返回值：操作结果描述文本
+        """
+        wb = self.left_wb if side == "left" else self.right_wb
+        path = self.left_path if side == "left" else self.right_path
+        side_label = "左侧" if side == "left" else "右侧"
+
+        if not (wb and path):
+            msg = f"{side_label}无可保存的文件"
+            if not quiet:
+                QMessageBox.warning(self, "无可保存", msg)
+            return msg
+
+        # 无变化时不保存仅提示
+        if not self._dirty[side]:
+            msg = f"{side_label}无未保存更改"
+            if not quiet:
+                self.update_status(msg)
+            return msg
+
+        # FR-05-03：保存前自动备份原文件（仅当有未保存修改且尚未备份时）
+        self._backup_if_needed(side)
+        try:
+            ExcelLoader.save_workbook(wb, path)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{side_label}保存失败: {exc}"
+            if not quiet:
+                QMessageBox.critical(self, "保存失败", f"保存文件失败:\n{path}\n\n{exc}")
+            return msg
 
         # FR-05 可靠性：保存后完整性校验
-        if not self._verify_integrity(self.left_path):
-            return
+        if not self._verify_integrity(path):
+            return f"{side_label}完整性校验失败"
 
-        self._dirty = False
-        self._backup_done = True
-        if self._last_backup_path:
-            self.backup_label.setText(
-                f"备份: {os.path.basename(self._last_backup_path)}"
-            )
-        self.update_status("已保存")
+        # 复位该侧脏标记
+        self._dirty[side] = False
+        self._backup_done[side] = True
+        self._refresh_backup_label()
+        msg = f"{side_label}已保存"
+        if not quiet:
+            self.update_status(msg)
+        return msg
 
     def save_as(self) -> None:
         """另存左侧工作簿到用户指定路径，不改变 left_path。
 
-        另存前若存在未保存修改，先备份原始文件（FR-05-02：不破坏原文件）。
+        另存前若左侧存在未保存修改，先备份原始文件（FR-05-02：不破坏原文件）。
+        另存不会复位左侧脏标记（原文件仍未保存到原路径）。
         """
         if not self.left_wb:
-            QMessageBox.warning(self, "无可保存", "无可保存的文件")
+            QMessageBox.warning(self, "无可保存", "左侧无可保存的文件")
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "另存为", "", "Excel Files (*.xlsx)"
@@ -1225,8 +1274,8 @@ class MainWindow(QMainWindow):
         # 确保 .xlsx 后缀
         if not path.lower().endswith(".xlsx"):
             path += ".xlsx"
-        # 有未保存修改时先备份原始文件
-        self._backup_if_needed()
+        # 左侧有未保存修改时先备份原始文件
+        self._backup_if_needed("left")
         try:
             ExcelLoader.save_workbook(self.left_wb, path)
         except Exception as exc:  # noqa: BLE001
@@ -1237,36 +1286,55 @@ class MainWindow(QMainWindow):
         if not self._verify_integrity(path):
             return
         # 注意：不修改 self.left_path，原始文件路径保持不变
+        # 注意：不复位左侧脏标记（原文件仍未保存到原路径）
         self.update_status(f"已另存为 {path}")
 
-    def _backup_if_needed(self) -> None:
-        """保存前自动备份左侧原文件（FR-05-03）。
+    def _backup_if_needed(self, side: str) -> None:
+        """保存前自动备份指定侧原文件（FR-05-03）。
 
-        - left_path 为空则跳过；
-        - 已备份过当前脏状态（_backup_done=True）则跳过；
-        - 备份命名 ``<stem>_backup_<YYYYMMDD_HHMMSS>.xlsx``，与原文件同目录；
+        - side 为 "left" 或 "right"
+        - 该侧 path 为空则跳过；
+        - 已备份过当前脏状态（_backup_done[side]=True）则跳过；
+        - 备份命名 ``<stem>_backup_<YYYYMMDD_HHMMSS><ext>``，与原文件同目录；
         - 失败仅警告，不阻断保存流程。
         """
-        if not self.left_path:
+        path = self.left_path if side == "left" else self.right_path
+        if not path:
             return
-        if self._backup_done:
+        if self._backup_done[side]:
             return
         try:
-            dir_name = os.path.dirname(self.left_path)
-            stem = os.path.splitext(os.path.basename(self.left_path))[0]
+            dir_name, name = os.path.split(path)
+            stem, ext = os.path.splitext(name)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = os.path.join(
-                dir_name, f"{stem}_backup_{timestamp}.xlsx"
+                dir_name, f"{stem}_backup_{timestamp}{ext}"
             )
-            shutil.copy2(self.left_path, backup_path)
-            self._backup_done = True
-            self._last_backup_path = backup_path
-            self.backup_label.setText(f"备份: {os.path.basename(backup_path)}")
+            shutil.copy2(path, backup_path)
+            self._backup_done[side] = True
+            self._last_backup_path[side] = backup_path
+            self._refresh_backup_label()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
                 self, "备份失败",
                 f"创建备份失败，保存将继续:\n{exc}",
             )
+
+    def _refresh_backup_label(self) -> None:
+        """根据两侧备份状态刷新底部备份标签。
+
+        显示规则：任一侧有待保存脏状态 -> "备份: 待保存"；
+        否则汇总两侧最近备份文件名（无则"无"）。
+        """
+        if not self._backup_done["left"] or not self._backup_done["right"]:
+            self.backup_label.setText("备份: 待保存")
+            return
+        parts = []
+        for side, label in (("left", "左"), ("right", "右")):
+            bp = self._last_backup_path[side]
+            name = os.path.basename(bp) if bp else "无"
+            parts.append(f"{label}:{name}")
+        self.backup_label.setText("备份: " + " | ".join(parts))
 
     def _verify_integrity(self, path: str) -> bool:
         """保存后完整性校验：重新加载文件确认未损坏（FR-05 可靠性）。
@@ -1301,9 +1369,9 @@ class MainWindow(QMainWindow):
                 dir_name, f"{stem}_backup_{timestamp}{ext}"
             )
             shutil.copy2(path, backup_path)
-            self.backup_label.setText(f"备份: {os.path.basename(backup_path)}")
-            self._backup_done = True
-            self._last_backup_path = backup_path
+            self._backup_done[side] = True
+            self._last_backup_path[side] = backup_path
+            self._refresh_backup_label()
             self.update_status(f"已创建备份 {backup_path}")
         except Exception as exc:  # noqa: BLE001
             # 备份失败不阻断合并，仅提示
@@ -1552,9 +1620,9 @@ class MainWindow(QMainWindow):
         self._update_birds_eye()
         self._refresh_tables()
         self._run_compare()
-        self._dirty = True
-        self._backup_done = False
-        self.backup_label.setText("备份: 待保存")
+        self._dirty[side] = True
+        self._backup_done[side] = False
+        self._refresh_backup_label()
         # 合并后重新计算各 sheet 差异红点（可能当前 sheet 差异已消除）
         if self.left_wb and self.right_wb:
             self._compute_sheet_diff_summary()
@@ -2280,10 +2348,14 @@ class MainWindow(QMainWindow):
         if old_name in self._sheet_diff_summary:
             self._sheet_diff_summary[new_name] = self._sheet_diff_summary.pop(old_name)
 
-        # 标记脏状态（重命名未保存到文件）
-        self._dirty = True
-        self._backup_done = False
-        self.backup_label.setText("备份: 待保存")
+        # 标记脏状态（重命名未保存到文件）：实际被改动的侧标记为脏
+        if renamed_left:
+            self._dirty["left"] = True
+            self._backup_done["left"] = False
+        if renamed_right:
+            self._dirty["right"] = True
+            self._backup_done["right"] = False
+        self._refresh_backup_label()
         self.update_status(f"已重命名: {old_name} → {new_name}（仅本地）")
 
     def _on_tab_sheet_closed(self, name: str, close_others: bool) -> None:

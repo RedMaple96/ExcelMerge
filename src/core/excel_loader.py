@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 from copy import copy
-from dataclasses import dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
@@ -24,6 +24,9 @@ class SheetData:
     - worksheet: 原始 openpyxl Worksheet 对象，合并器需要它就地修改单元格/样式/合并区域
     - max_row / max_col: 数据区域的最大行/列数
     - values: 字符串化的单元格值二维表（0 索引），合并区域内所有单元格均填左上角值
+      （data_only=False 加载，公式单元格保留公式字符串）
+    - cached_values: 公式单元格的缓存计算值二维表（0 索引），由 data_only=True 副本提取。
+      None 表示无缓存值（如合并后重新提取、或非公式场景），此时比较器仅比较公式。
     - merged_ranges: 合并单元格区域列表，元素为 (min_row, min_col, max_row, max_col)，1 索引
     - header_labels: 列标签，如 ["A","B","C",...]，长度等于 max_col
     """
@@ -32,8 +35,9 @@ class SheetData:
     max_row: int
     max_col: int
     values: List[List[str]]
-    merged_ranges: List[Tuple[int, int, int, int]]
-    header_labels: List[str]
+    cached_values: Optional[List[List[str]]] = None
+    merged_ranges: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    header_labels: List[str] = field(default_factory=list)
 
 
 class ExcelLoader:
@@ -58,6 +62,21 @@ class ExcelLoader:
         return load_workbook(path, data_only=False, keep_vba=False)
 
     @staticmethod
+    def load_workbook_cached(path: str) -> Workbook:
+        """加载 .xlsx 工作簿的 data_only 副本（用于提取公式缓存计算值）。
+
+        data_only=True 时，公式单元格返回 Excel 上次保存时缓存的计算值
+        （而非公式字符串）。配合 load_workbook 使用以同时获取公式与计算值。
+        注意：若文件从未被 Excel 打开保存，缓存值可能为 None。
+        """
+        if not str(path).lower().endswith(".xlsx"):
+            raise ValueError(
+                f"仅支持 .xlsx 格式文件，收到: {path}。"
+                "如需支持旧版 .xls，请先用 Excel 另存为 .xlsx 后再处理。"
+            )
+        return load_workbook(path, data_only=True, keep_vba=False)
+
+    @staticmethod
     def get_sheet_names(wb: Workbook) -> List[str]:
         """返回工作簿中所有工作表名称。"""
         return wb.sheetnames
@@ -76,8 +95,16 @@ class ExcelLoader:
         return ranges
 
     @staticmethod
-    def extract_sheet_data(ws: Worksheet) -> SheetData:
-        """从 Worksheet 提取结构化数据 SheetData。"""
+    def extract_sheet_data(
+        ws: Worksheet, cached_ws: Optional[Worksheet] = None
+    ) -> SheetData:
+        """从 Worksheet 提取结构化数据 SheetData。
+
+        - ws: data_only=False 的工作表，公式单元格保留公式字符串。
+        - cached_ws: data_only=True 的同名工作表，用于提取公式单元格的缓存计算值。
+          传入后 cached_values 字段被填充；为 None 时 cached_values=None
+          （比较器退化为仅比较公式）。
+        """
         max_row = ws.max_row or 0
         max_col = ws.max_column or 0
 
@@ -90,6 +117,7 @@ class ExcelLoader:
                 max_row=max_row,
                 max_col=max_col,
                 values=[],
+                cached_values=None,
                 merged_ranges=merged_ranges,
                 header_labels=[],
             )
@@ -113,6 +141,29 @@ class ExcelLoader:
                     if 1 <= r <= max_row and 1 <= c <= max_col:
                         values[r - 1][c - 1] = top_value
 
+        # 缓存计算值（data_only=True 副本）：用于检测"公式相同但计算值不同"
+        cached_values: Optional[List[List[str]]] = None
+        if cached_ws is not None:
+            cached_values = [
+                ["" for _ in range(max_col)] for _ in range(max_row)
+            ]
+            for r in range(1, max_row + 1):
+                for c in range(1, max_col + 1):
+                    cached_values[r - 1][c - 1] = ExcelLoader._stringify(
+                        cached_ws.cell(r, c).value
+                    )
+            # 合并单元格同样用左上角缓存值填充
+            for mr in cached_ws.merged_cells.ranges:
+                min_r, min_c = mr.min_row, mr.min_col
+                max_r, max_c = mr.max_row, mr.max_col
+                top_value = ExcelLoader._stringify(
+                    cached_ws.cell(min_r, min_c).value
+                )
+                for r in range(min_r, max_r + 1):
+                    for c in range(min_c, max_c + 1):
+                        if 1 <= r <= max_row and 1 <= c <= max_col:
+                            cached_values[r - 1][c - 1] = top_value
+
         header_labels = [get_column_letter(i) for i in range(1, max_col + 1)]
 
         return SheetData(
@@ -120,6 +171,7 @@ class ExcelLoader:
             max_row=max_row,
             max_col=max_col,
             values=values,
+            cached_values=cached_values,
             merged_ranges=merged_ranges,
             header_labels=header_labels,
         )

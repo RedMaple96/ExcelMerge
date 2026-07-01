@@ -35,11 +35,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
-    QSizePolicy,
-    QStyle,
     QTableWidget,
     QTableWidgetItem,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -72,6 +69,9 @@ class MainWindow(QMainWindow):
         self.right_path: Optional[str] = None
         self.left_wb = None
         self.right_wb = None
+        # data_only=True 副本，用于提取公式单元格的缓存计算值（检测公式相同但计算值不同）
+        self.left_wb_cached = None
+        self.right_wb_cached = None
         self.left_sheet_data: Optional[SheetData] = None
         self.right_sheet_data: Optional[SheetData] = None
         self.left_sheet_name: str = ""
@@ -98,7 +98,6 @@ class MainWindow(QMainWindow):
         # ---- 构建界面 ----
         self._init_ui()
         self._init_menubar()
-        self._init_toolbar()
         self._init_statusbar()
         self._init_connections()
         self._init_shortcuts()
@@ -299,18 +298,6 @@ class MainWindow(QMainWindow):
         self.action_show_same.toggled.connect(self._on_view_filter_changed)
         m_view.addAction(self.action_show_same)
 
-        self.action_show_left_only = QAction("显示仅左侧", self)
-        self.action_show_left_only.setCheckable(True)
-        self.action_show_left_only.setChecked(True)
-        self.action_show_left_only.toggled.connect(self._on_view_filter_changed)
-        m_view.addAction(self.action_show_left_only)
-
-        self.action_show_right_only = QAction("显示仅右侧", self)
-        self.action_show_right_only.setCheckable(True)
-        self.action_show_right_only.setChecked(True)
-        self.action_show_right_only.toggled.connect(self._on_view_filter_changed)
-        m_view.addAction(self.action_show_right_only)
-
         # ---- 帮助(H) ----
         m_help = menubar.addMenu("帮助(&H)")
 
@@ -321,76 +308,6 @@ class MainWindow(QMainWindow):
         self.action_shortcuts = QAction("快捷键列表", self)
         self.action_shortcuts.triggered.connect(self.show_shortcuts)
         m_help.addAction(self.action_shortcuts)
-
-    # ------------------------------------------------------------------ #
-    # 工具栏
-    # ------------------------------------------------------------------ #
-    def _init_toolbar(self) -> None:
-        """构建水平工具栏：打开左/打开右/保存/交换/上一个差异/下一个差异/统计/列设置/合并。"""
-        self.toolbar = QToolBar("主工具栏", self)
-        self.toolbar.setMovable(False)
-        self.toolbar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        self.addToolBar(self.toolbar)
-
-        style = self.style()
-        icon = lambda sp: style.standardIcon(sp)  # noqa: E731
-
-        self.tb_open_left = self.toolbar.addAction(
-            icon(QStyle.SP_DirOpenIcon), "打开左", self._on_open_left
-        )
-        self.tb_open_right = self.toolbar.addAction(
-            icon(QStyle.SP_DirOpenIcon), "打开右", self._on_open_right
-        )
-        self.tb_save = self.toolbar.addAction(
-            icon(QStyle.SP_DialogSaveButton), "保存", self.save
-        )
-        self.toolbar.addSeparator()
-        self.tb_swap = self.toolbar.addAction(
-            icon(QStyle.SP_BrowserReload), "交换", self.swap_sides
-        )
-        self.tb_prev_diff = self.toolbar.addAction(
-            icon(QStyle.SP_ArrowUp), "上一个差异", self.prev_diff
-        )
-        self.tb_next_diff = self.toolbar.addAction(
-            icon(QStyle.SP_ArrowDown), "下一个差异", self.next_diff
-        )
-        self.toolbar.addSeparator()
-        self.tb_statistics = self.toolbar.addAction(
-            icon(QStyle.SP_FileDialogListView), "统计", self.show_statistics
-        )
-        self.tb_column_settings = self.toolbar.addAction(
-            icon(QStyle.SP_FileDialogDetailedView), "列设置", self.open_column_settings
-        )
-        self.tb_merge = self.toolbar.addAction(
-            icon(QStyle.SP_DialogApplyButton), "合并", self.merge
-        )
-
-        # ---- 过滤器：全部 / 差异 / 相同（核心切换） ----
-        self.toolbar.addSeparator()
-        filter_label = QLabel("过滤器:")
-        self.toolbar.addWidget(filter_label)
-        self.filter_combo = QComboBox(self)
-        self.filter_combo.addItem("全部")
-        self.filter_combo.addItem("差异")
-        self.filter_combo.addItem("相同")
-        self.filter_combo.setToolTip(
-            "全部：显示所有行\n"
-            "差异：只显示有差异的行（隐藏完全相同的行）\n"
-            "相同：只显示完全相同的行"
-        )
-        # 显式设置最小宽度，避免 QToolBar 压缩导致文字截断
-        # 中文字符约 13-14px/字，"全部"2字 + 下拉箭头 + 边距，给足 90px
-        self.filter_combo.setMinimumWidth(90)
-        self.filter_combo.setSizePolicy(
-            QSizePolicy.Minimum, QSizePolicy.Fixed
-        )
-        # 弹出下拉列表宽度与组合框一致
-        self.filter_combo.view().setMinimumWidth(90)
-        self.filter_combo.setCurrentIndex(0)
-        self.filter_combo.currentIndexChanged.connect(
-            self._on_filter_preset_changed
-        )
-        self.toolbar.addWidget(self.filter_combo)
 
     # ------------------------------------------------------------------ #
     # 状态栏
@@ -547,6 +464,13 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "加载失败", f"无法加载文件:\n{path}\n\n{exc}")
             return
 
+        # 加载 data_only=True 副本以获取公式缓存计算值（data_only 副本加载失败不致命，
+        # 比较器会退化为仅比较公式）
+        try:
+            wb_cached = ExcelLoader.load_workbook_cached(path)
+        except Exception:  # noqa: BLE001
+            wb_cached = None
+
         sheet_names = ExcelLoader.get_sheet_names(wb)
         if not sheet_names:
             QMessageBox.warning(self, "空工作簿", f"文件中没有工作表:\n{path}")
@@ -555,10 +479,12 @@ class MainWindow(QMainWindow):
         if side == "left":
             self.left_path = path
             self.left_wb = wb
+            self.left_wb_cached = wb_cached
             combo = self.left_sheet_combo
         else:
             self.right_path = path
             self.right_wb = wb
+            self.right_wb_cached = wb_cached
             combo = self.right_sheet_combo
 
         # 填充下拉（屏蔽信号避免重复触发）
@@ -702,11 +628,17 @@ class MainWindow(QMainWindow):
         返回 True 表示成功；失败时弹警告并返回 False。
         """
         wb = self.left_wb if side == "left" else self.right_wb
+        wb_cached = self.left_wb_cached if side == "left" else self.right_wb_cached
         if wb is None:
             return False
         try:
             ws = ExcelLoader.get_worksheet(wb, name)
-            sheet_data = ExcelLoader.extract_sheet_data(ws)
+            cached_ws = (
+                ExcelLoader.get_worksheet(wb_cached, name)
+                if wb_cached is not None and name in wb_cached.sheetnames
+                else None
+            )
+            sheet_data = ExcelLoader.extract_sheet_data(ws, cached_ws)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Sheet 读取失败", f"无法读取工作表 {name}:\n{exc}")
             return False
@@ -977,11 +909,9 @@ class MainWindow(QMainWindow):
 
         aligned = self.diff_result.aligned_rows
         aligned_cols = self.diff_result.aligned_cols
-        # 视图过滤开关
+        # 视图过滤开关（仅左/仅右行始终显示）
         show_diff = self.action_show_diff.isChecked()
         show_same = self.action_show_same.isChecked()
-        show_left_only = self.action_show_left_only.isChecked()
-        show_right_only = self.action_show_right_only.isChecked()
 
         # 3. 列级着色：独占列本身 + 虚拟空列
         for c, cp in enumerate(aligned_cols):
@@ -999,17 +929,11 @@ class MainWindow(QMainWindow):
             pair = aligned[i]
             status = pair.status
 
-            # 行可见性过滤
+            # 行可见性过滤（仅左/仅右行始终显示）
             if status == "different" and not show_diff:
                 self._hide_row_pair(i)
                 continue
             if status == "same" and not show_same:
-                self._hide_row_pair(i)
-                continue
-            if status == "left_only" and not show_left_only:
-                self._hide_row_pair(i)
-                continue
-            if status == "right_only" and not show_right_only:
                 self._hide_row_pair(i)
                 continue
 
@@ -1257,6 +1181,9 @@ class MainWindow(QMainWindow):
             self.right_path,
         ) = self.right_path, self.left_path
         self.left_wb, self.right_wb = self.right_wb, self.left_wb
+        self.left_wb_cached, self.right_wb_cached = (
+            self.right_wb_cached, self.left_wb_cached
+        )
         (
             self.left_sheet_data,
             self.right_sheet_data,
@@ -2055,56 +1982,8 @@ class MainWindow(QMainWindow):
         self.diff_col_birds_eye.setVisible(checked)
 
     def _on_view_filter_changed(self) -> None:
-        """显示差异/相同/仅左/仅右 过滤变化 —— 触发重渲染（Task 6 实装过滤）。"""
-        self._sync_filter_combo_from_checks()
+        """显示差异/相同 过滤变化 —— 触发重渲染。"""
         self._render_diffs()
-
-    def _on_filter_preset_changed(self, idx: int) -> None:
-        """工具栏过滤器预设切换：根据预设同步 4 个细粒度过滤开关。
-
-        - 全部(0)：4 个开关全开
-        - 差异(1)：显示差异/仅左/仅右，隐藏相同
-        - 相同(2)：仅显示相同，隐藏差异/仅左/仅右
-        """
-        if idx == 0:  # 全部
-            show_diff, show_same, show_left, show_right = True, True, True, True
-        elif idx == 1:  # 差异
-            show_diff, show_same, show_left, show_right = True, False, True, True
-        else:  # 相同
-            show_diff, show_same, show_left, show_right = False, True, False, False
-
-        for act, val in (
-            (self.action_show_diff, show_diff),
-            (self.action_show_same, show_same),
-            (self.action_show_left_only, show_left),
-            (self.action_show_right_only, show_right),
-        ):
-            act.blockSignals(True)
-            act.setChecked(val)
-            act.blockSignals(False)
-        self._render_diffs()
-
-    def _sync_filter_combo_from_checks(self) -> None:
-        """根据 4 个细粒度过滤开关的实际状态，反向同步工具栏过滤器预设。
-
-        状态匹配某预设时同步显示；不匹配时保留当前选择不动，避免误导。
-        """
-        d = self.action_show_diff.isChecked()
-        s = self.action_show_same.isChecked()
-        l = self.action_show_left_only.isChecked()
-        r = self.action_show_right_only.isChecked()
-
-        if d and s and l and r:
-            idx = 0  # 全部
-        elif d and not s and l and r:
-            idx = 1  # 差异
-        elif not d and s and not l and not r:
-            idx = 2  # 相同
-        else:
-            return  # 自定义组合，不更新预设
-        self.filter_combo.blockSignals(True)
-        self.filter_combo.setCurrentIndex(idx)
-        self.filter_combo.blockSignals(False)
 
     def resize_columns(self) -> None:
         """按内容自动调整列宽。"""
@@ -2277,8 +2156,20 @@ class MainWindow(QMainWindow):
             try:
                 lws = ExcelLoader.get_worksheet(self.left_wb, name)
                 rws = ExcelLoader.get_worksheet(self.right_wb, name)
-                ldata = ExcelLoader.extract_sheet_data(lws)
-                rdata = ExcelLoader.extract_sheet_data(rws)
+                lcached = (
+                    ExcelLoader.get_worksheet(self.left_wb_cached, name)
+                    if self.left_wb_cached is not None
+                    and name in self.left_wb_cached.sheetnames
+                    else None
+                )
+                rcached = (
+                    ExcelLoader.get_worksheet(self.right_wb_cached, name)
+                    if self.right_wb_cached is not None
+                    and name in self.right_wb_cached.sheetnames
+                    else None
+                )
+                ldata = ExcelLoader.extract_sheet_data(lws, lcached)
+                rdata = ExcelLoader.extract_sheet_data(rws, rcached)
                 diff = ExcelComparator.compare_sheets(
                     ldata, rdata, self.key_cols, self.ignore_cols
                 )

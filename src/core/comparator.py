@@ -103,7 +103,9 @@ class ExcelComparator:
         - 行对齐：
           * 无 key_cols：基于行内容签名（same 列的值）LCS 对齐。
           * 有 key_cols：按 key 匹配配对。
-        - 公式按字面量比较（values 中已是字符串）。
+        - 公式按字面量比较（values 中已是字符串）；若 SheetData 提供
+          cached_values（data_only=True 缓存计算值），公式相同但计算值不同
+          也判定为差异。
         """
         if key_cols is None:
             key_cols = []
@@ -157,11 +159,13 @@ class ExcelComparator:
             ExcelComparator._align_by_content(
                 left.values, right.values, aligned_cols, same_col_info,
                 ignore_set, append_pair,
+                left.cached_values, right.cached_values,
             )
         else:
             ExcelComparator._align_by_key(
                 left.values, right.values, key_cols, aligned_cols,
                 same_col_info, ignore_set, append_pair,
+                left.cached_values, right.cached_values,
             )
 
         return DiffResult(
@@ -370,6 +374,8 @@ class ExcelComparator:
         same_col_info: List[Tuple[int, int, int]],
         ignore_set: Set[int],
         append_pair: Callable,
+        left_cached: Optional[List[List[str]]] = None,
+        right_cached: Optional[List[List[str]]] = None,
     ) -> None:
         """默认顺序对齐：基于行内容签名（same 列的值）的 LCS + 间隙配对。
 
@@ -384,7 +390,9 @@ class ExcelComparator:
         if n_left == n_right:
             for i in range(n_left):
                 equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                    left_values[i], right_values[i], aligned_cols, ignore_set
+                    left_values[i], right_values[i], aligned_cols, ignore_set,
+                    left_cached[i] if left_cached else None,
+                    right_cached[i] if right_cached else None,
                 )
                 append_pair(
                     i, i, "same" if equal else "different",
@@ -409,7 +417,9 @@ class ExcelComparator:
                 _, li, ri = raw[k]
                 # 签名匹配后仍需验证实际值（公式归一化可能导致签名相同但值不同）
                 equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                    left_values[li], right_values[ri], aligned_cols, ignore_set
+                    left_values[li], right_values[ri], aligned_cols, ignore_set,
+                    left_cached[li] if left_cached else None,
+                    right_cached[ri] if right_cached else None,
                 )
                 append_pair(
                     li, ri, "same" if equal else "different",
@@ -430,7 +440,9 @@ class ExcelComparator:
                     li = left_block[m]
                     ri = right_block[m]
                     equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                        left_values[li], right_values[ri], aligned_cols, ignore_set
+                        left_values[li], right_values[ri], aligned_cols, ignore_set,
+                        left_cached[li] if left_cached else None,
+                        right_cached[ri] if right_cached else None,
                     )
                     append_pair(
                         li, ri, "same" if equal else "different",
@@ -450,6 +462,8 @@ class ExcelComparator:
         same_col_info: List[Tuple[int, int, int]],
         ignore_set: Set[int],
         append_pair: Callable,
+        left_cached: Optional[List[List[str]]] = None,
+        right_cached: Optional[List[List[str]]] = None,
     ) -> None:
         """关键列对齐：按 key 配对（首次未消费优先）+ right_only 按原始位置插入。
 
@@ -515,7 +529,9 @@ class ExcelComparator:
                 append_pair(li, None, "left_only")
             else:
                 equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                    left_values[li], right_values[ri], aligned_cols, ignore_set
+                    left_values[li], right_values[ri], aligned_cols, ignore_set,
+                    left_cached[li] if left_cached else None,
+                    right_cached[ri] if right_cached else None,
                 )
                 append_pair(
                     li, ri, "same" if equal else "different",
@@ -553,14 +569,18 @@ class ExcelComparator:
         right_row: List[str],
         aligned_cols: List[ColPair],
         ignore_set: Set[int],
+        left_cached_row: Optional[List[str]] = None,
+        right_cached_row: Optional[List[str]] = None,
     ) -> Tuple[bool, List[int]]:
         """比较两行（在 aligned_cols 范围内、排除 ignore_set）。
 
-        - same 列：比较两侧值
+        - same 列：比较两侧公式（values）与缓存计算值（cached_values），
+          公式或缓存值任一不同即判定为差异。无缓存值时退化为仅比较公式。
         - left_only / right_only 列：不参与比较（跳过），保证"相同内容不错位"
 
         返回 (是否全等, 差异列的 aligned_col 索引列表)。
         """
+        has_cached = left_cached_row is not None and right_cached_row is not None
         diff_cells: List[int] = []
         for idx, cp in enumerate(aligned_cols):
             if idx in ignore_set:
@@ -580,4 +600,20 @@ class ExcelComparator:
             )
             if lv != rv:
                 diff_cells.append(idx)
+                continue
+            # 公式相同：若两侧都有缓存计算值，进一步比较计算值
+            # （检测"公式相同但计算结果不同"的差异）
+            if has_cached:
+                lcv = (
+                    left_cached_row[cp.left_col]
+                    if cp.left_col is not None and cp.left_col < len(left_cached_row)
+                    else ""
+                )
+                rcv = (
+                    right_cached_row[cp.right_col]
+                    if cp.right_col is not None and cp.right_col < len(right_cached_row)
+                    else ""
+                )
+                if lcv != rcv:
+                    diff_cells.append(idx)
         return (len(diff_cells) == 0), diff_cells

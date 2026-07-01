@@ -774,8 +774,14 @@ class MainWindow(QMainWindow):
             left_indices = [i if i < n_left else None for i in range(n)]
             right_indices = [i if i < n_right else None for i in range(n)]
 
-        self._populate_table(self.left_table, left, left_indices, aligned_cols, "left")
-        self._populate_table(self.right_table, right, right_indices, aligned_cols, "right")
+        self._populate_table(
+            self.left_table, left, left_indices, aligned_cols, "left",
+            right, right_indices,
+        )
+        self._populate_table(
+            self.right_table, right, right_indices, aligned_cols, "right",
+            left, left_indices,
+        )
 
     def _populate_table(
         self,
@@ -784,6 +790,8 @@ class MainWindow(QMainWindow):
         row_indices: List[Optional[int]],
         aligned_cols: List[ColPair],
         side: str,
+        other_sheet_data: Optional[SheetData] = None,
+        other_row_indices: Optional[List[Optional[int]]] = None,
     ) -> None:
         """按给定的源行索引列表和对齐列填充表格。
 
@@ -792,6 +800,8 @@ class MainWindow(QMainWindow):
           right_only 列左侧为虚拟空列。
         - 虚拟空行/空列创建占位 QTableWidgetItem（文本为空，标记 __virtual__），
           以便后续 _render_diffs 可对其着色。
+        - 单元格默认显示文本值（缓存计算值）；当两侧文本值一致但公式不同时
+          显示公式，以便直观呈现"同值异式"差异。无缓存数据时退化为显示公式。
         """
         table.blockSignals(True)
         try:
@@ -825,12 +835,40 @@ class MainWindow(QMainWindow):
 
                     # 虚拟空行 或 有数据
                     if src_idx is not None and sheet_data is not None:
-                        values = (
-                            sheet_data.values[src_idx]
-                            if src_idx < len(sheet_data.values)
-                            else []
+                        formula, cached = self._get_formula_and_cached(
+                            sheet_data, src_idx, col_idx
                         )
-                        text = values[col_idx] if col_idx < len(values) else ""
+                        # 无缓存数据：退化为公式
+                        if sheet_data.cached_values is None:
+                            text = formula
+                        else:
+                            # 默认显示文本值；same 列且两侧文本值一致、
+                            # 公式不同时显示公式
+                            text = cached
+                            if (
+                                cp.status == "same"
+                                and other_sheet_data is not None
+                                and other_row_indices is not None
+                            ):
+                                other_src_idx = (
+                                    other_row_indices[r]
+                                    if r < len(other_row_indices)
+                                    else None
+                                )
+                                other_col_idx = (
+                                    cp.right_col if side == "left" else cp.left_col
+                                )
+                                other_formula, other_cached = (
+                                    self._get_formula_and_cached(
+                                        other_sheet_data, other_src_idx, other_col_idx
+                                    )
+                                )
+                                if (
+                                    other_sheet_data.cached_values is not None
+                                    and cached == other_cached
+                                    and formula != other_formula
+                                ):
+                                    text = formula
                         table.setItem(r, c, QTableWidgetItem(text))
                     else:
                         # 虚拟空行
@@ -841,6 +879,35 @@ class MainWindow(QMainWindow):
             table.verticalHeader().setVisible(self.show_row_numbers)
         finally:
             table.blockSignals(False)
+
+    @staticmethod
+    def _get_formula_and_cached(
+        sheet_data: Optional[SheetData],
+        src_idx: Optional[int],
+        col_idx: Optional[int],
+    ) -> Tuple[str, str]:
+        """返回指定单元格的 (公式文本, 缓存文本值)。
+
+        公式取自 data_only=False 的 values；缓存文本值取自 data_only=True 的
+        cached_values（无缓存数据时 cached 返回 ""）。越界或缺数据时返回 ("", "")。
+        """
+        if src_idx is None or sheet_data is None or col_idx is None:
+            return "", ""
+        values_row = (
+            sheet_data.values[src_idx]
+            if src_idx < len(sheet_data.values)
+            else []
+        )
+        formula = values_row[col_idx] if col_idx < len(values_row) else ""
+        cached = ""
+        if sheet_data.cached_values is not None:
+            cached_row = (
+                sheet_data.cached_values[src_idx]
+                if src_idx < len(sheet_data.cached_values)
+                else []
+            )
+            cached = cached_row[col_idx] if col_idx < len(cached_row) else ""
+        return formula, cached
 
     def _run_compare(self) -> None:
         """两侧数据齐全时启动后台比较线程，避免阻塞 UI。

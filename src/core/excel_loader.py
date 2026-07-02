@@ -237,10 +237,13 @@ class ExcelLoader:
                 wb._pending_cached_values[ws_name][tgt_cell.coordinate] = cached_value  # type: ignore[attr-defined]
 
     @staticmethod
-    def save_workbook(wb: Workbook, path: str) -> None:
+    def save_workbook(wb: Workbook, path: str, cached_wb: Optional[Workbook] = None) -> None:
         """保存工作簿到指定路径，并注入缓存计算值到公式单元格。
 
+        - cached_wb: data_only=True 加载的同源工作簿副本，用于保留未修改公式单元格的原有缓存值。
+          若为 None，则仅注入 _pending_cached_values 中的新缓存值（其他公式单元格缓存值将丢失）。
         - 先用 openpyxl 保存到临时文件
+        - 收集所有公式单元格的缓存值（以 cached_wb 为基底，_pending_cached_values 覆盖新增/修改）
         - 解析 workbook.xml 建立 sheet_name -> sheet_xml_path 映射
         - 扫描每个 sheet XML，为有缓存值的公式单元格替换/插入 <v> 标签
         - 移动到目标路径
@@ -251,9 +254,8 @@ class ExcelLoader:
         except Exception:  # noqa: BLE001
             pass
 
-        cached_values: Dict[str, Dict[str, str]] = getattr(
-            wb, "_pending_cached_values", {}
-        )
+        # 收集所有需要注入的缓存值
+        cached_values = ExcelLoader._collect_all_cached_values(wb, cached_wb)
 
         if not cached_values:
             wb.save(path)
@@ -270,6 +272,65 @@ class ExcelLoader:
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    @staticmethod
+    def _is_formula_cell(cell) -> bool:
+        """判断单元格是否为公式单元格。"""
+        value = cell.value
+        if value is None:
+            return False
+        # 公式字符串（以 = 开头）
+        if isinstance(value, str) and value.startswith("="):
+            return True
+        # ArrayFormula / DataTableFormula 等公式对象
+        if getattr(value, "text", None) is not None:
+            return True
+        return False
+
+    @staticmethod
+    def _collect_all_cached_values(
+        wb: Workbook, cached_wb: Optional[Workbook]
+    ) -> Dict[str, Dict[str, str]]:
+        """收集所有公式单元格的缓存值，用于保存时注入XML。
+
+        1. 以 cached_wb（data_only=True副本）中所有公式单元格的缓存值为基底（保留未修改单元格的缓存值）
+        2. 用 _pending_cached_values 中的值覆盖（合并操作新增/修改的单元格）
+        返回格式: {sheet_name: {coordinate: cached_value_str}}
+        """
+        result: Dict[str, Dict[str, str]] = {}
+
+        # 第一步：从 cached_wb 收集基底缓存值
+        if cached_wb is not None:
+            for sheet_name in wb.sheetnames:
+                if sheet_name not in cached_wb.sheetnames:
+                    continue
+                ws = wb[sheet_name]
+                cached_ws = cached_wb[sheet_name]
+                sheet_values: Dict[str, str] = {}
+                # 遍历主wb中所有单元格，对公式单元格从cached_wb取缓存值
+                for row in ws.iter_rows():
+                    for cell in row:
+                        if ExcelLoader._is_formula_cell(cell):
+                            try:
+                                cached_cell = cached_ws[cell.coordinate]
+                                cached_val = cached_cell.value
+                                if cached_val is not None:
+                                    sheet_values[cell.coordinate] = ExcelLoader._stringify(cached_val)
+                            except Exception:
+                                pass
+                if sheet_values:
+                    result[sheet_name] = sheet_values
+
+        # 第二步：用 _pending_cached_values 覆盖（合并操作的新值优先级最高）
+        pending: Dict[str, Dict[str, str]] = getattr(
+            wb, "_pending_cached_values", {}
+        )
+        for sheet_name, coords in pending.items():
+            if sheet_name not in result:
+                result[sheet_name] = {}
+            result[sheet_name].update(coords)
+
+        return result
 
     @staticmethod
     def _get_sheet_xml_mapping(

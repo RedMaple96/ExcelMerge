@@ -1304,6 +1304,7 @@ class MainWindow(QMainWindow):
         - 返回值：操作结果描述文本
         """
         wb = self.left_wb if side == "left" else self.right_wb
+        wb_cached = self.left_wb_cached if side == "left" else self.right_wb_cached
         path = self.left_path if side == "left" else self.right_path
         side_label = "左侧" if side == "left" else "右侧"
 
@@ -1323,7 +1324,7 @@ class MainWindow(QMainWindow):
         # FR-05-03：保存前自动备份原文件（仅当有未保存修改且尚未备份时）
         self._backup_if_needed(side)
         try:
-            ExcelLoader.save_workbook(wb, path)
+            ExcelLoader.save_workbook(wb, path, cached_wb=wb_cached)
         except Exception as exc:  # noqa: BLE001
             msg = f"{side_label}保存失败: {exc}"
             if not quiet:
@@ -1362,7 +1363,7 @@ class MainWindow(QMainWindow):
         # 左侧有未保存修改时先备份原始文件
         self._backup_if_needed("left")
         try:
-            ExcelLoader.save_workbook(self.left_wb, path)
+            ExcelLoader.save_workbook(self.left_wb, path, cached_wb=self.left_wb_cached)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self, "另存失败", f"另存文件失败:\n{path}\n\n{exc}"

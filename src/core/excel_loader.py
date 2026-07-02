@@ -57,13 +57,7 @@ class ExcelLoader:
         - 注意：openpyxl 的 load_workbook 在当前版本没有 keep_styles 参数，
           样式默认就会被保留，因此此处无需也无法显式传入（PRD 中提到的
           keep_styles=True 并非真实参数，样式保留是默认行为）。
-        - 仅支持 .xlsx；遇到 .xls 等旧格式抛出 ValueError。
         """
-        if not str(path).lower().endswith(".xlsx"):
-            raise ValueError(
-                f"仅支持 .xlsx 格式文件，收到: {path}。"
-                "如需支持旧版 .xls，请先用 Excel 另存为 .xlsx 后再处理。"
-            )
         return load_workbook(path, data_only=False, keep_vba=False)
 
     @staticmethod
@@ -74,11 +68,6 @@ class ExcelLoader:
         （而非公式字符串）。配合 load_workbook 使用以同时获取公式与计算值。
         注意：若文件从未被 Excel 打开保存，缓存值可能为 None。
         """
-        if not str(path).lower().endswith(".xlsx"):
-            raise ValueError(
-                f"仅支持 .xlsx 格式文件，收到: {path}。"
-                "如需支持旧版 .xls，请先用 Excel 另存为 .xlsx 后再处理。"
-            )
         return load_workbook(path, data_only=True, keep_vba=False)
 
     @staticmethod

@@ -65,7 +65,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Excel Merge — 无标题")
+        self.setWindowTitle("ExcelMerge — 无标题")
         self.resize(1200, 750)
 
         # ---- 共享状态 ----
@@ -523,10 +523,10 @@ class MainWindow(QMainWindow):
 
         side: "left" 或 "right"。
         """
-        if not str(path).lower().endswith(".xlsx"):
+        if not os.path.exists(path):
             QMessageBox.warning(
-                self, "文件格式不支持",
-                f"仅支持 .xlsx 格式文件:\n{path}\n如需支持旧版 .xls，请先另存为 .xlsx。",
+                self, "文件不存在",
+                f"找不到文件:\n{path}",
             )
             return
 
@@ -1690,11 +1690,8 @@ class MainWindow(QMainWindow):
         self._run_compare()
         self._dirty[side] = True
         self._backup_done[side] = False
-        # 合并后重新计算各 sheet 差异红点（可能当前 sheet 差异已消除）
-        if self.left_wb and self.right_wb:
-            self._compute_sheet_diff_summary()
-            diff_set = {n for n, has in self._sheet_diff_summary.items() if has}
-            self.bottom_bar.update_diff_status(diff_set)
+        # 合并后只重置当前sheet的差异状态，不重新计算所有sheet（避免阻塞UI）
+        # 当前sheet的差异状态会在_compare完成后由_update_current_sheet_diff_status更新
 
     def on_context_menu(self, pos) -> None:
         """表格右键菜单：根据触发表格决定“复制到对侧”的文案与方向。
@@ -2319,7 +2316,7 @@ class MainWindow(QMainWindow):
     def about(self) -> None:
         QMessageBox.about(
             self, "关于",
-            "Excel Merge\n\n"
+            "ExcelMerge\n\n"
             "支持差异可视化、多策略合并、合并单元格与公式保留。\n\n"
             "文件格式：仅支持 Microsoft Excel 2007+ 的 .xlsx 格式。\n"
             "旧版 .xls 文件请先在 Excel 中另存为 .xlsx。",
@@ -2439,7 +2436,11 @@ class MainWindow(QMainWindow):
     # 全工作簿逐 Sheet 差异红点
     # ------------------------------------------------------------------ #
     def _refresh_bottom_bar_sheets(self) -> None:
-        """两侧均加载后，重建底部标签栏并计算各 Sheet 差异状态。"""
+        """两侧均加载后，重建底部标签栏。
+        
+        注意：不在此处同步计算所有Sheet的差异状态（会阻塞UI），
+        只在当前Sheet比较完成后更新该Sheet的红点状态。
+        """
         if not (self.left_wb and self.right_wb):
             return
 
@@ -2452,8 +2453,13 @@ class MainWindow(QMainWindow):
             if n not in all_names:
                 all_names.append(n)
 
-        # 计算各 sheet 差异状态
-        self._compute_sheet_diff_summary()
+        # 初始时不计算所有Sheet差异，避免阻塞UI
+        # 仅一侧存在的Sheet标记为有差异，双侧共有的待比较后更新
+        self._sheet_diff_summary = {}
+        for name in all_names:
+            in_left = name in left_names
+            in_right = name in right_names
+            self._sheet_diff_summary[name] = not (in_left and in_right)
 
         diff_set = {n for n, has in self._sheet_diff_summary.items() if has}
         self.bottom_bar.set_sheets(all_names, diff_set)

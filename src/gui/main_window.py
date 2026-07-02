@@ -698,9 +698,10 @@ class MainWindow(QMainWindow):
         if btn == QMessageBox.Save:
             for s in dirty_sides:
                 self._save_side(s, quiet=True)
-        # 保存或丢弃后均从磁盘重载，确保切换后是最新数据
-        for s in dirty_sides:
-            self._reload_workbook(s)
+        elif btn == QMessageBox.Discard:
+            # 丢弃修改：从磁盘重载，恢复到上次保存的状态
+            for s in dirty_sides:
+                self._reload_workbook(s)
         return True
 
     def _reload_workbook(self, side: str) -> None:
@@ -1335,9 +1336,10 @@ class MainWindow(QMainWindow):
         if not self._verify_integrity(path):
             return f"{side_label}完整性校验失败"
 
-        # 复位该侧脏标记
-        self._dirty[side] = False
-        self._backup_done[side] = True
+        # 保存成功后从磁盘重载 wb 和 wb_cached，确保内存与磁盘一致
+        # 这样后续切换 sheet 时，即使 _dirty 为 False 不再重载，数据也是最新的
+        self._reload_workbook(side)
+
         msg = f"{side_label}已保存"
         if not quiet:
             self.update_status(msg)

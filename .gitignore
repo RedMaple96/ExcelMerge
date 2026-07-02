@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.egg-info/
+.Python
 .venv/
 venv/
 env/
@@ -12,6 +13,8 @@ env/
 build/
 dist/
 *.spec
+.pyinstaller_cache/
+.pyi_cache/
 
 # 系统/编辑器
 .DS_Store
@@ -22,5 +25,7 @@ dist/
 
 # 测试/缓存
 .pytest_cache/
+.coverage.*
 .coverage
-htmlcov/
+.mypy_cache/
+.ruff_cache/

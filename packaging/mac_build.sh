@@ -9,17 +9,13 @@ rm -rf build dist
 # 将 PyInstaller 缓存重定向到项目内，避免沙箱/权限问题
 export PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller_cache"
 
-echo "==> 开始 PyInstaller 打包..."
+echo "==> 开始 PyInstaller 打包 (使用 onedir 模式优化启动速度)..."
 python3 -m PyInstaller \
     --noconfirm \
-    --windowed \
-    --onefile \
-    --name "Excel Merge" \
-    --add-data "src:src" \
-    --hidden-import openpyxl \
-    main.py
+    --clean \
+    ExcelMerge.spec
 
-echo "✅ .app 构建完成: dist/Excel Merge.app (二进制: dist/Excel Merge)"
+echo "✅ .app 构建完成: dist/Excel Merge.app"
 
 # 如已安装 create-dmg 则生成 DMG
 if command -v create-dmg >/dev/null 2>&1; then

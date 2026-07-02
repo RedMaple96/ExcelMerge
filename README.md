@@ -3,8 +3,9 @@
 [简体中文](./README.zh-CN.md) | **English**
 
 [![License](https://img.shields.io/github/license/RedMaple96/ExcelMerge?style=for-the-badge)](./LICENSE)
-[![Release](https://img.shields.io/github/v/release/RedMaple96/ExcelMerge?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
-[![Downloads](https://img.shields.io/github/downloads/RedMaple96/ExcelMerge/total?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
+[![openpyxl](https://img.shields.io/badge/openpyxl-3.1%2B-217346?style=for-the-badge)](https://openpyxl.readthedocs.io/)
 
 `Excel Merge` is a desktop application for Excel diffing and merge workflows. It is designed for projects that need to load two `.xlsx` files, identify row and column differences, apply overwrite or append merge strategies, and support visual confirmation before saving. 
 
@@ -16,6 +17,7 @@
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Usage Examples](#usage-examples)
+- [Testing](#testing)
 - [API Reference](#api-reference)
 - [Contributing](#contributing)
 - [License](#license)
@@ -34,7 +36,8 @@ This project currently uses Python, PySide6, and openpyxl to provide a GUI-based
 - Detect differences with header-aware and content-aware alignment logic.
 - Support common merge strategies such as right-to-left overwrite, left-to-right overwrite, and append-only merge.
 - Review differences visually in the GUI, navigate changed regions, and confirm merge actions manually.
-- Keep the document GitHub-ready with standard badges, links, and reusable placeholders.
+- Package desktop builds for macOS and Windows with the scripts under `packaging/`.
+- Cover the core pipeline with automated tests under `tests/`.
 
 <a id="quick-start"></a>
 ## Quick Start
@@ -49,6 +52,7 @@ python main.py
 ```
 
 If you want to package the application for desktop distribution, continue with `packaging/mac_build.sh` or `packaging/windows_build.bat`.
+The current repository does not include a GitHub Actions workflow yet, so packaging is expected to run locally for now.
 
 <a id="requirements"></a>
 ## Requirements
@@ -78,7 +82,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
-If you need distributable artifacts, validate the GUI behavior, file permissions, and target platform compatibility locally before running your packaging script or CI workflow.
+If you need distributable artifacts, validate the GUI behavior, file permissions, and target platform compatibility locally before running the packaging script.
+The macOS script builds `dist/Excel Merge.app` and optionally `dist/Excel Merge.dmg`, while the Windows script builds `dist/Excel Merge.exe`.
 
 <a id="usage-examples"></a>
 ## Usage Examples
@@ -129,6 +134,16 @@ right_data = ExcelLoader.extract_sheet_data(right_ws)
 diff_result = ExcelComparator.compare_sheets(left_data, right_data)
 ExcelMerger.merge_right_to_left(diff_result, left_data, right_data)
 ExcelLoader.save_workbook(left_wb, "merged-output.xlsx")
+```
+
+<a id="testing"></a>
+## Testing
+
+The repository already includes automated tests for the core comparison and merge pipeline under `tests/`.
+GUI behavior is not covered by automated tests because it requires a graphical environment.
+
+```bash
+python -m unittest discover -s tests
 ```
 
 <a id="api-reference"></a>
@@ -192,7 +207,8 @@ The maintainer information is listed below:
 <a id="changelog"></a>
 ## Changelog
 
-Keep user-facing release notes in this section or move them into a dedicated `CHANGELOG.md` file and link it here.
+Project history is maintained in [CHANGELOG.md](./CHANGELOG.md).
+At the moment, the repository does not have published Git tags or GitHub Releases yet, so the changelog acts as the current source of truth for documented changes.
 
 ### `v0.1.0` - `2026-06-30`
 
@@ -202,4 +218,4 @@ Keep user-facing release notes in this section or move them into a dedicated `CH
 
 ## Customization Notes
 
-Before publishing this file to GitHub, make sure the `LICENSE` file exists and that your release links match the tags you publish in the repository.
+Before publishing future releases, add Git tags and GitHub Releases if you want to restore release-related badges in this README.

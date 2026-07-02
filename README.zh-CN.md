@@ -3,8 +3,9 @@
 **简体中文** | [English](./README.md)
 
 [![开源许可](https://img.shields.io/github/license/RedMaple96/ExcelMerge?style=for-the-badge)](./LICENSE)
-[![版本发布](https://img.shields.io/github/v/release/RedMaple96/ExcelMerge?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
-[![下载量](https://img.shields.io/github/downloads/RedMaple96/ExcelMerge/total?style=for-the-badge)](https://github.com/RedMaple96/ExcelMerge/releases)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
+[![openpyxl](https://img.shields.io/badge/openpyxl-3.1%2B-217346?style=for-the-badge)](https://openpyxl.readthedocs.io/)
 
 `Excel Merge` 是一个面向 Excel 差异比对与合并场景的桌面应用，适用于需要加载两个 `.xlsx` 文件、识别行列差异、执行覆盖或追加合并，并以可视化方式辅助人工确认的项目。
 
@@ -16,6 +17,7 @@
 - [环境依赖](#requirements)
 - [安装部署](#installation)
 - [使用示例](#usage-examples)
+- [测试说明](#testing)
 - [API 文档](#api-reference)
 - [贡献指南](#contributing)
 - [开源许可](#license)
@@ -34,7 +36,8 @@
 - 支持基于标题行和内容对齐的差异识别。
 - 支持右覆盖、左覆盖、追加差异行等常见合并策略。
 - 支持在图形界面中查看差异、导航变更位置并执行人工确认。
-- 保留 GitHub 常用徽章、链接与占位符，适合继续扩展和发布。
+- 支持通过 `packaging/` 目录中的脚本打包 macOS 和 Windows 桌面产物。
+- 核心比较与合并流程已具备 `tests/` 目录下的自动化测试覆盖。
 
 <a id="quick-start"></a>
 ## 快速开始
@@ -48,7 +51,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-如果你希望将应用打包为桌面分发版本，可以继续结合 `packaging/mac_build.sh` 或 `packaging/windows_build.bat` 完成构建流程。
+如果你希望将应用打包为桌面分发版本，可以继续结合 `packaging/mac_build.sh` 或 `packaging/windows_build.bat` 完成构建流程。当前仓库还没有 GitHub Actions 工作流，因此现阶段主要依赖本地打包。
 
 <a id="requirements"></a>
 ## 环境依赖
@@ -78,7 +81,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-如果需要生成可分发构建产物，请先在本地验证 GUI 行为、文件读写权限与目标平台兼容性，再执行打包脚本或 CI 工作流。
+如果需要生成可分发构建产物，请先在本地验证 GUI 行为、文件读写权限与目标平台兼容性，再执行打包脚本。macOS 脚本会生成 `dist/Excel Merge.app`，并在安装了 `create-dmg` 时额外生成 `dist/Excel Merge.dmg`；Windows 脚本会生成 `dist/Excel Merge.exe`。
 
 <a id="usage-examples"></a>
 ## 使用示例
@@ -129,6 +132,16 @@ right_data = ExcelLoader.extract_sheet_data(right_ws)
 diff_result = ExcelComparator.compare_sheets(left_data, right_data)
 ExcelMerger.merge_right_to_left(diff_result, left_data, right_data)
 ExcelLoader.save_workbook(left_wb, "merged-output.xlsx")
+```
+
+<a id="testing"></a>
+## 测试说明
+
+当前仓库已经在 `tests/` 目录下提供核心比较与合并流程的自动化测试。
+GUI 相关行为因为依赖图形环境，暂未纳入自动化测试覆盖。
+
+```bash
+python -m unittest discover -s tests
 ```
 
 <a id="api-reference"></a>
@@ -192,7 +205,8 @@ ExcelLoader.save_workbook(left_wb, "merged-output.xlsx")
 <a id="changelog"></a>
 ## 更新日志
 
-建议将面向用户的版本变化记录统一维护在本节，或拆分到独立的 `CHANGELOG.md` 文件并从此处链接。
+项目变更历史统一维护在 [CHANGELOG.md](./CHANGELOG.md)。
+当前仓库还没有正式发布的 Git 标签或 GitHub Release，因此 `CHANGELOG.md` 是现阶段最准确的变更记录来源。
 
 ### `v0.1.0` - `2026-06-30`
 
@@ -202,4 +216,4 @@ ExcelLoader.save_workbook(left_wb, "merged-output.xlsx")
 
 ## 自定义提示
 
-正式上传到 GitHub 前，建议确认根目录已存在 `LICENSE` 文件，并确保发布页链接能对应到你实际创建的版本标签。
+如果后续需要恢复“版本发布”或“下载量”类徽章，建议在仓库中补充 Git 标签和 GitHub Releases。

@@ -900,6 +900,7 @@ class MainWindow(QMainWindow):
         - 单元格默认显示文本值（缓存计算值）；当两侧文本值一致但公式不同时
           显示公式，以便直观呈现"同值异式"差异。无缓存数据时退化为显示公式。
         """
+        table.setUpdatesEnabled(False)
         table.blockSignals(True)
         try:
             table.setRowCount(0)
@@ -976,6 +977,7 @@ class MainWindow(QMainWindow):
             table.verticalHeader().setVisible(self.show_row_numbers)
         finally:
             table.blockSignals(False)
+            table.setUpdatesEnabled(True)
 
     @staticmethod
     def _get_formula_and_cached(
@@ -1132,73 +1134,80 @@ class MainWindow(QMainWindow):
         transparent = QBrush(Qt.transparent)
         n_rows = self.left_table.rowCount()
 
-        # 1. 复位背景与行隐藏
-        for table in (self.left_table, self.right_table):
-            for r in range(table.rowCount()):
-                table.setRowHidden(r, False)
-                for c in range(table.columnCount()):
-                    item = table.item(r, c)
-                    if item is not None:
-                        item.setBackground(transparent)
+        # 批量着色期间禁用重绘，避免逐格 setBackground 触发反复 repaint
+        self.left_table.setUpdatesEnabled(False)
+        self.right_table.setUpdatesEnabled(False)
+        try:
+            # 1. 复位背景与行隐藏
+            for table in (self.left_table, self.right_table):
+                for r in range(table.rowCount()):
+                    table.setRowHidden(r, False)
+                    for c in range(table.columnCount()):
+                        item = table.item(r, c)
+                        if item is not None:
+                            item.setBackground(transparent)
 
-        # 2. 无比较结果时直接返回
-        if not self.diff_result:
-            return
+            # 2. 无比较结果时直接返回
+            if not self.diff_result:
+                return
 
-        aligned = self.diff_result.aligned_rows
-        aligned_cols = self.diff_result.aligned_cols
-        # 视图过滤开关（仅左/仅右行始终显示，不受开关控制）
-        show_diff = self.action_show_diff.isChecked()
-        show_same = self.action_show_same.isChecked()
+            aligned = self.diff_result.aligned_rows
+            aligned_cols = self.diff_result.aligned_cols
+            # 视图过滤开关（仅左/仅右行始终显示，不受开关控制）
+            show_diff = self.action_show_diff.isChecked()
+            show_same = self.action_show_same.isChecked()
 
-        # 3. 列级着色：独占列本身 + 虚拟空列
-        for c, cp in enumerate(aligned_cols):
-            if cp.status == "left_only":
-                # 左侧独占列：左侧蓝色，右侧虚拟空列灰色
-                self._paint_col(self.left_table, c, colors["left_only_col"])
-                self._paint_col(self.right_table, c, colors["col_gap"])
-            elif cp.status == "right_only":
-                # 右侧独占列：右侧绿色，左侧虚拟空列灰色
-                self._paint_col(self.right_table, c, colors["right_only_col"])
-                self._paint_col(self.left_table, c, colors["col_gap"])
+            # 3. 列级着色：独占列本身 + 虚拟空列
+            for c, cp in enumerate(aligned_cols):
+                if cp.status == "left_only":
+                    # 左侧独占列：左侧蓝色，右侧虚拟空列灰色
+                    self._paint_col(self.left_table, c, colors["left_only_col"])
+                    self._paint_col(self.right_table, c, colors["col_gap"])
+                elif cp.status == "right_only":
+                    # 右侧独占列：右侧绿色，左侧虚拟空列灰色
+                    self._paint_col(self.right_table, c, colors["right_only_col"])
+                    self._paint_col(self.left_table, c, colors["col_gap"])
 
-        # 4. 逐行着色 / 过滤（行级着色覆盖列级，但保留虚拟空侧）
-        for i in range(min(n_rows, len(aligned))):
-            pair = aligned[i]
-            status = pair.status
+            # 4. 逐行着色 / 过滤（行级着色覆盖列级，但保留虚拟空侧）
+            for i in range(min(n_rows, len(aligned))):
+                pair = aligned[i]
+                status = pair.status
 
-            # 行可见性过滤
-            if status == "different" and not show_diff:
-                self._hide_row_pair(i)
-                continue
-            if status == "same" and not show_same:
-                self._hide_row_pair(i)
-                continue
+                # 行可见性过滤
+                if status == "different" and not show_diff:
+                    self._hide_row_pair(i)
+                    continue
+                if status == "same" and not show_same:
+                    self._hide_row_pair(i)
+                    continue
 
-            # 行级着色
-            if status == "different":
-                # 浅红底 + 差异单元格深红
-                self._paint_row(self.left_table, i, colors["diff_row"])
-                self._paint_row(self.right_table, i, colors["diff_row"])
-                # 差异单元格深红（覆盖行底色）
-                for c in pair.diff_cells:
-                    self._paint_cell(self.left_table, i, c, colors["diff_cell"])
-                    self._paint_cell(self.right_table, i, c, colors["diff_cell"])
-                # 独占列的虚拟空侧恢复 col_gap（覆盖行底色）
-                for c, cp in enumerate(aligned_cols):
-                    if cp.status == "left_only":
-                        self._paint_cell(self.right_table, i, c, colors["col_gap"])
-                    elif cp.status == "right_only":
-                        self._paint_cell(self.left_table, i, c, colors["col_gap"])
-            elif status == "left_only":
-                # 左侧蓝色（独占行），右侧浅蓝灰（虚拟空行）
-                self._paint_row(self.left_table, i, colors["left_only_row"])
-                self._paint_row(self.right_table, i, colors["left_only_gap"])
-            elif status == "right_only":
-                # 右侧绿色（独占行），左侧浅绿灰（虚拟空行）
-                self._paint_row(self.right_table, i, colors["right_only_row"])
-                self._paint_row(self.left_table, i, colors["right_only_gap"])
-            # same: 不着色（列级着色保留）
+                # 行级着色
+                if status == "different":
+                    # 浅红底 + 差异单元格深红
+                    self._paint_row(self.left_table, i, colors["diff_row"])
+                    self._paint_row(self.right_table, i, colors["diff_row"])
+                    # 差异单元格深红（覆盖行底色）
+                    for c in pair.diff_cells:
+                        self._paint_cell(self.left_table, i, c, colors["diff_cell"])
+                        self._paint_cell(self.right_table, i, c, colors["diff_cell"])
+                    # 独占列的虚拟空侧恢复 col_gap（覆盖行底色）
+                    for c, cp in enumerate(aligned_cols):
+                        if cp.status == "left_only":
+                            self._paint_cell(self.right_table, i, c, colors["col_gap"])
+                        elif cp.status == "right_only":
+                            self._paint_cell(self.left_table, i, c, colors["col_gap"])
+                elif status == "left_only":
+                    # 左侧蓝色（独占行），右侧浅蓝灰（虚拟空行）
+                    self._paint_row(self.left_table, i, colors["left_only_row"])
+                    self._paint_row(self.right_table, i, colors["left_only_gap"])
+                elif status == "right_only":
+                    # 右侧绿色（独占行），左侧浅绿灰（虚拟空行）
+                    self._paint_row(self.right_table, i, colors["right_only_row"])
+                    self._paint_row(self.left_table, i, colors["right_only_gap"])
+                # same: 不着色（列级着色保留）
+        finally:
+            self.left_table.setUpdatesEnabled(True)
+            self.right_table.setUpdatesEnabled(True)
 
         # 同步全局差异缩略图标记
         self._update_birds_eye()

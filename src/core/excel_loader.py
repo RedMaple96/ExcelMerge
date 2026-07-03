@@ -89,24 +89,44 @@ class ExcelLoader:
         return ranges
 
     @staticmethod
-    def _find_actual_bounds(ws: Worksheet) -> Tuple[int, int]:
-        """查找工作表实际有数据的边界（裁剪尾部空行空列）。
+    def _build_value_grid(
+        ws: Worksheet,
+    ) -> Tuple[int, int, List[List[str]]]:
+        """单次遍历 ws._cells，同时计算实际数据边界并构建字符串值二维表。
 
-        openpyxl 的 max_row/max_column 可能因为样式、格式、合并单元格等原因
-        返回远大于实际数据区域的值，导致内存浪费和UI卡顿。
-        直接访问 _cells 字典只检查实际有内容的单元格，避免遍历全部空列。
+        相比 _find_actual_bounds + 逐格 ws.cell(r,c) 的双重遍历，直接遍历
+        _cells 字典只访问实际存在的单元格，避免为空单元格创建 Cell 对象
+        的开销，显著提升大表加载速度。
+
+        边界判定与 _find_actual_bounds 一致：仅非空（strip 后）单元格计入
+        边界，但所有非 None 值单元格（含纯空白）在边界内保留原值。
+        返回 (max_row, max_col, values)；全空时返回 (0, 0, [])。
         """
+        if not ws._cells:
+            return 0, 0, []
+        cell_map: Dict[Tuple[int, int], str] = {}
         actual_max_row = 0
         actual_max_col = 0
-        # ws._cells 是 {(row, col): cell} 字典，只包含实际访问过/有内容的单元格
-        # 遍历这个字典比 iter_rows() 高效得多，不会遍历空列
         for (row, col), cell in ws._cells.items():
-            if cell.value is not None and str(cell.value).strip() != "":
+            val = cell.value
+            if val is None:
+                continue
+            s = ExcelLoader._stringify(val)
+            cell_map[(row, col)] = s
+            if s.strip() != "":
                 if row > actual_max_row:
                     actual_max_row = row
                 if col > actual_max_col:
                     actual_max_col = col
-        return actual_max_row, actual_max_col
+        if actual_max_row <= 0 or actual_max_col <= 0:
+            return 0, 0, []
+        values: List[List[str]] = [
+            ["" for _ in range(actual_max_col)] for _ in range(actual_max_row)
+        ]
+        for (row, col), s in cell_map.items():
+            if 1 <= row <= actual_max_row and 1 <= col <= actual_max_col:
+                values[row - 1][col - 1] = s
+        return actual_max_row, actual_max_col, values
 
     @staticmethod
     def extract_sheet_data(
@@ -122,17 +142,11 @@ class ExcelLoader:
         注意：会自动裁剪尾部的空行空列，避免因样式/格式导致max_row/max_col
         远大于实际数据区域，造成内存和UI渲染性能问题。
         """
-        raw_max_row = ws.max_row or 0
-        raw_max_col = ws.max_column or 0
-
-        # 裁剪尾部空行空列：找到真正有数据的边界
-        max_row, max_col = ExcelLoader._find_actual_bounds(ws)
-        # 防御：如果全表为空，使用0
-        if max_row <= 0 or max_col <= 0:
-            max_row = 0
-            max_col = 0
-
         merged_ranges = ExcelLoader.get_merged_ranges(ws)
+
+        # 单次遍历 ws._cells 同时计算边界并构建值二维表
+        # （替代原先 _find_actual_bounds + 逐格 ws.cell() 双重遍历，大幅提速）
+        max_row, max_col, values = ExcelLoader._build_value_grid(ws)
 
         # 空表保护：行或列为 0 时返回空结构，避免后续循环越界
         if max_row <= 0 or max_col <= 0:
@@ -146,43 +160,44 @@ class ExcelLoader:
                 header_labels=[],
             )
 
-        # 先按单元格原值构建字符串二维表
-        values: List[List[str]] = [
-            ["" for _ in range(max_col)] for _ in range(max_row)
-        ]
-        for r in range(1, max_row + 1):
-            for c in range(1, max_col + 1):
-                values[r - 1][c - 1] = ExcelLoader._stringify(ws.cell(r, c).value)
-
         # 合并单元格：用左上角值填充区域内所有单元格，保证比较时一致
         for mr in ws.merged_cells.ranges:
             min_r, min_c = mr.min_row, mr.min_col
             max_r, max_c = mr.max_row, mr.max_col
-            top_value = ExcelLoader._stringify(ws.cell(min_r, min_c).value)
+            # 越界保护：合并区域理论上不会超出 max_row/max_col，此处防御性裁剪
+            if not (1 <= min_r <= max_row and 1 <= min_c <= max_col):
+                continue
+            top_value = values[min_r - 1][min_c - 1]
             for r in range(min_r, max_r + 1):
                 for c in range(min_c, max_c + 1):
-                    # 越界保护：合并区域理论上不会超出 max_row/max_col，此处防御性裁剪
                     if 1 <= r <= max_row and 1 <= c <= max_col:
                         values[r - 1][c - 1] = top_value
 
         # 缓存计算值（data_only=True 副本）：用于检测"公式相同但计算值不同"
         cached_values: Optional[List[List[str]]] = None
         if cached_ws is not None:
+            _, _, cached_grid = ExcelLoader._build_value_grid(cached_ws)
+            # 对齐到主表尺寸（cached 副本可能因缓存值为空而尺寸略小）
             cached_values = [
                 ["" for _ in range(max_col)] for _ in range(max_row)
             ]
-            for r in range(1, max_row + 1):
-                for c in range(1, max_col + 1):
-                    cached_values[r - 1][c - 1] = ExcelLoader._stringify(
-                        cached_ws.cell(r, c).value
-                    )
+            if cached_grid:
+                c_rows = len(cached_grid)
+                c_cols = len(cached_grid[0]) if c_rows > 0 else 0
+                copy_r = min(max_row, c_rows)
+                copy_c = min(max_col, c_cols)
+                for r in range(copy_r):
+                    src_row = cached_grid[r]
+                    dst_row = cached_values[r]
+                    for c in range(copy_c):
+                        dst_row[c] = src_row[c]
             # 合并单元格同样用左上角缓存值填充
             for mr in cached_ws.merged_cells.ranges:
                 min_r, min_c = mr.min_row, mr.min_col
                 max_r, max_c = mr.max_row, mr.max_col
-                top_value = ExcelLoader._stringify(
-                    cached_ws.cell(min_r, min_c).value
-                )
+                if not (1 <= min_r <= max_row and 1 <= min_c <= max_col):
+                    continue
+                top_value = cached_values[min_r - 1][min_c - 1]
                 for r in range(min_r, max_r + 1):
                     for c in range(min_c, max_c + 1):
                         if 1 <= r <= max_row and 1 <= c <= max_col:

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import bisect
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Set, Tuple
@@ -578,11 +579,15 @@ class ExcelComparator:
 
         unconsumed_right = [j for j in range(n_right) if j not in consumed_right]
 
+        # 计算每个未消费右侧行的插入位置（其前已配对的右侧行数）。
+        # 原实现为 O(unconsumed * pairs) 线性扫描，大文件下退化为 O(n²)；
+        # 改为对已配对右侧行索引排序后用 bisect 二分查找，降为 O(n log n)。
+        paired_right_sorted = sorted(
+            ri for (_li, ri) in pairs if ri is not None
+        )
         right_by_pos: dict = defaultdict(list)
         for j in unconsumed_right:
-            count = sum(
-                1 for (_li, ri) in pairs if ri is not None and ri < j
-            )
+            count = bisect.bisect_left(paired_right_sorted, j)
             right_by_pos[count].append(j)
         for v in right_by_pos.values():
             v.sort()

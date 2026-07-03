@@ -1214,14 +1214,21 @@ class MainWindow(QMainWindow):
             self.diff_birds_eye.set_diff_rows(
                 self.diff_result.diff_row_indices, row_types
             )
-            # 列方向：从 aligned_cols 收集差异列
-            diff_col_indices = [
-                i for i, cp in enumerate(self.diff_result.aligned_cols)
-                if cp.status in ("left_only", "right_only")
-            ]
-            col_types = [
-                self.diff_result.aligned_cols[i].status for i in diff_col_indices
-            ]
+            # 列方向：收集所有差异列
+            # - left_only/right_only：整列独占（结构性差异），蓝/绿
+            # - same 列中存在单元格值差异：从 diff_cell_set 提取，红
+            diff_col_set: set = set()
+            col_type_map: dict = {}
+            for i, cp in enumerate(self.diff_result.aligned_cols):
+                if cp.status in ("left_only", "right_only"):
+                    diff_col_set.add(i)
+                    col_type_map[i] = cp.status
+            for _r, c in self.diff_result.diff_cell_set:
+                if c not in col_type_map:
+                    diff_col_set.add(c)
+                    col_type_map[c] = "different"
+            diff_col_indices = sorted(diff_col_set)
+            col_types = [col_type_map[i] for i in diff_col_indices]
             self.diff_col_birds_eye.set_diff_cols(diff_col_indices, col_types)
         else:
             self.diff_birds_eye.clear()

@@ -18,7 +18,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QRect, QSize
 from PySide6.QtGui import QBrush, QColor, QMouseEvent, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QAbstractItemView, QTableWidget, QWidget
+from PySide6.QtWidgets import QTableWidget, QWidget
 
 from src.gui.themes import is_dark_mode
 
@@ -240,20 +240,29 @@ class DiffColBirdsEyeView(QWidget):
         return best
 
     def _scroll_to_col(self, col: int, select: bool = False) -> None:
-        """滚动主表格至指定列（居中），可选同步选中。"""
+        """滚动主表格至指定列（水平居中），可选同步选中。
+
+        仅调整水平滚动条，保持垂直位置不变，避免与行导航条互相干扰。
+        """
         tbl = self._table
         if col < 0 or col >= tbl.columnCount():
             return
-        item = tbl.item(0, col)
-        if item is not None:
-            tbl.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
-        else:
-            model = tbl.model()
-            if model is not None:
-                tbl.scrollTo(model.index(0, col), QAbstractItemView.ScrollHint.PositionAtCenter)
-        # 仅在列未被过滤隐藏时同步选中
+        if not tbl.isColumnHidden(col):
+            hbar = tbl.horizontalScrollBar()
+            col_left = tbl.columnViewportPosition(col)
+            col_w = tbl.columnWidth(col)
+            viewport_w = tbl.viewport().width()
+            # 将目标列中心对齐到视口中心
+            delta = (col_left + col_w // 2) - viewport_w // 2
+            hbar.setValue(hbar.value() + delta)
+        # 仅在列未被过滤隐藏时同步选中，保持当前行不变
         if select and not tbl.isColumnHidden(col):
-            tbl.setCurrentCell(0, col)
+            row = tbl.currentRow()
+            if row < 0:
+                row = tbl.rowAt(0)
+                if row < 0:
+                    row = 0
+            tbl.setCurrentCell(row, col)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.LeftButton:

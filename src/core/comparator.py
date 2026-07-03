@@ -332,9 +332,17 @@ class ExcelComparator:
         - ('left', left_idx): 仅左侧有的行
         - ('right', right_idx): 仅右侧有的行
         顺序与原始行顺序一致（已 reverse 还原）。
+
+        性能保护：当任一序列长度超过 _LCS_MAX_SIZE 时，退化为简单的
+        贪心位置配对，避免 O(n*m) DP 内存/时间爆炸（如16000列场景）。
         """
         n_left = len(left_sigs)
         n_right = len(right_sigs)
+
+        # 性能阈值：超过该大小时不使用标准LCS DP，避免内存爆炸
+        _LCS_MAX_SIZE = 500
+        if n_left > _LCS_MAX_SIZE or n_right > _LCS_MAX_SIZE:
+            return ExcelComparator._greedy_align(left_sigs, right_sigs)
 
         dp: List[List[int]] = [[0] * (n_right + 1) for _ in range(n_left + 1)]
         for i in range(1, n_left + 1):
@@ -364,6 +372,63 @@ class ExcelComparator:
             raw.append(("right", j - 1))
             j -= 1
         raw.reverse()
+        return raw
+
+    @staticmethod
+    def _greedy_align(left_sigs: List, right_sigs: List) -> List[Tuple]:
+        """大序列快速对齐：贪心位置匹配 + 顺序配对。
+
+        - 优先匹配位置相同且签名相等的项
+        - 剩余项按顺序配对：短的匹配完后长的标记为独占
+        - 时间/空间复杂度 O(n+m)，适合超大序列
+        """
+        n_left = len(left_sigs)
+        n_right = len(right_sigs)
+        raw: List[Tuple] = []
+        i, j = 0, 0
+        while i < n_left and j < n_right:
+            if left_sigs[i] == right_sigs[j]:
+                raw.append(("match", i, j))
+                i += 1
+                j += 1
+            else:
+                # 尝试向右找右侧匹配
+                found_j = -1
+                search_limit = min(j + 20, n_right)
+                for jj in range(j + 1, search_limit):
+                    if left_sigs[i] == right_sigs[jj]:
+                        found_j = jj
+                        break
+                if found_j >= 0:
+                    for jj in range(j, found_j):
+                        raw.append(("right", jj))
+                    raw.append(("match", i, found_j))
+                    i += 1
+                    j = found_j + 1
+                    continue
+                # 尝试向下找左侧匹配
+                found_i = -1
+                search_limit = min(i + 20, n_left)
+                for ii in range(i + 1, search_limit):
+                    if left_sigs[ii] == right_sigs[j]:
+                        found_i = ii
+                        break
+                if found_i >= 0:
+                    for ii in range(i, found_i):
+                        raw.append(("left", ii))
+                    raw.append(("match", found_i, j))
+                    i = found_i + 1
+                    j += 1
+                    continue
+                # 都没找到：左侧当前行标记为left_only，推进i
+                raw.append(("left", i))
+                i += 1
+        while i < n_left:
+            raw.append(("left", i))
+            i += 1
+        while j < n_right:
+            raw.append(("right", j))
+            j += 1
         return raw
 
     @staticmethod

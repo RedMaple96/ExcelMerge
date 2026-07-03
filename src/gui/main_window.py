@@ -54,7 +54,7 @@ from src.gui.column_settings_dialog import ColumnSettingsDialog
 from src.gui.diff_birds_eye import DiffBirdsEyeView
 from src.gui.diff_col_birds_eye import DiffColBirdsEyeView
 from src.gui.themes import is_dark_mode
-from src.gui.workers import CompareWorker
+from src.gui.workers import CompareWorker, SheetDiffSummaryWorker
 
 
 class MainWindow(QMainWindow):
@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         self._sync_scroll_blocked: bool = False  # 同步滚动防递归守卫
         self._current_diff_pos: int = -1  # 差异导航游标（指向 diff_row_indices）
         self._compare_worker: Optional[CompareWorker] = None  # 比较后台线程
+        self._sheet_summary_worker: Optional[SheetDiffSummaryWorker] = None  # 全sheet差异预计算线程
         # 按侧别(left/right)跟踪脏状态与备份状态
         self._dirty = {"left": False, "right": False}  # 是否有未保存的修改
         self._backup_done = {"left": True, "right": True}  # 当前脏状态是否已备份
@@ -2436,11 +2437,7 @@ class MainWindow(QMainWindow):
     # 全工作簿逐 Sheet 差异红点
     # ------------------------------------------------------------------ #
     def _refresh_bottom_bar_sheets(self) -> None:
-        """两侧均加载后，重建底部标签栏。
-        
-        注意：不在此处同步计算所有Sheet的差异状态（会阻塞UI），
-        只在当前Sheet比较完成后更新该Sheet的红点状态。
-        """
+        """两侧均加载后，重建底部标签栏并启动后台线程预计算所有Sheet差异状态。"""
         if not (self.left_wb and self.right_wb):
             return
 
@@ -2453,21 +2450,48 @@ class MainWindow(QMainWindow):
             if n not in all_names:
                 all_names.append(n)
 
-        # 初始时不计算所有Sheet差异，避免阻塞UI
-        # 仅一侧存在的Sheet标记为有差异，双侧共有的待比较后更新
+        # 先初始化：仅一侧存在的Sheet立即标记为有差异，双侧共有的待后台计算
         self._sheet_diff_summary = {}
+        initial_diff_set = set()
         for name in all_names:
             in_left = name in left_names
             in_right = name in right_names
-            self._sheet_diff_summary[name] = not (in_left and in_right)
+            has_diff = not (in_left and in_right)
+            self._sheet_diff_summary[name] = has_diff
+            if has_diff:
+                initial_diff_set.add(name)
 
-        diff_set = {n for n, has in self._sheet_diff_summary.items() if has}
-        self.bottom_bar.set_sheets(all_names, diff_set)
+        self.bottom_bar.set_sheets(all_names, initial_diff_set)
 
         # 高亮当前 sheet
         current = self.left_sheet_name or self.right_sheet_name
         if current:
             self.bottom_bar.set_active(current)
+
+        # 停止之前的预计算线程（如果有）
+        if self._sheet_summary_worker is not None and self._sheet_summary_worker.isRunning():
+            self._sheet_summary_worker.quit()
+            self._sheet_summary_worker.wait()
+
+        # 启动后台线程预计算所有双侧共有Sheet的差异状态
+        self._sheet_summary_worker = SheetDiffSummaryWorker(
+            self.left_wb, self.right_wb,
+            self.left_wb_cached, self.right_wb_cached,
+            self.key_cols, self.ignore_cols,
+        )
+        self._sheet_summary_worker.sheet_result.connect(self._on_sheet_summary_result)
+        self._sheet_summary_worker.finished_ok.connect(self._on_sheet_summary_finished)
+        self._sheet_summary_worker.start()
+
+    def _on_sheet_summary_result(self, name: str, has_diff: bool) -> None:
+        """后台预计算：单个Sheet结果返回，更新红点状态。"""
+        self._sheet_diff_summary[name] = has_diff
+        diff_set = {n for n, h in self._sheet_diff_summary.items() if h}
+        self.bottom_bar.update_diff_status(diff_set)
+
+    def _on_sheet_summary_finished(self) -> None:
+        """后台预计算：全部Sheet计算完成。"""
+        self._sheet_summary_worker = None
 
     def _compute_sheet_diff_summary(self) -> None:
         """遍历所有 sheet，计算是否有差异（用于红点标记）。"""

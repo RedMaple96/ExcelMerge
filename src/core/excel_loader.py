@@ -89,6 +89,26 @@ class ExcelLoader:
         return ranges
 
     @staticmethod
+    def _find_actual_bounds(ws: Worksheet) -> Tuple[int, int]:
+        """查找工作表实际有数据的边界（裁剪尾部空行空列）。
+
+        openpyxl 的 max_row/max_column 可能因为样式、格式、合并单元格等原因
+        返回远大于实际数据区域的值，导致内存浪费和UI卡顿。
+        直接访问 _cells 字典只检查实际有内容的单元格，避免遍历全部空列。
+        """
+        actual_max_row = 0
+        actual_max_col = 0
+        # ws._cells 是 {(row, col): cell} 字典，只包含实际访问过/有内容的单元格
+        # 遍历这个字典比 iter_rows() 高效得多，不会遍历空列
+        for (row, col), cell in ws._cells.items():
+            if cell.value is not None and str(cell.value).strip() != "":
+                if row > actual_max_row:
+                    actual_max_row = row
+                if col > actual_max_col:
+                    actual_max_col = col
+        return actual_max_row, actual_max_col
+
+    @staticmethod
     def extract_sheet_data(
         ws: Worksheet, cached_ws: Optional[Worksheet] = None
     ) -> SheetData:
@@ -98,9 +118,19 @@ class ExcelLoader:
         - cached_ws: data_only=True 的同名工作表，用于提取公式单元格的缓存计算值。
           传入后 cached_values 字段被填充；为 None 时 cached_values=None
           （比较器退化为仅比较公式）。
+
+        注意：会自动裁剪尾部的空行空列，避免因样式/格式导致max_row/max_col
+        远大于实际数据区域，造成内存和UI渲染性能问题。
         """
-        max_row = ws.max_row or 0
-        max_col = ws.max_column or 0
+        raw_max_row = ws.max_row or 0
+        raw_max_col = ws.max_column or 0
+
+        # 裁剪尾部空行空列：找到真正有数据的边界
+        max_row, max_col = ExcelLoader._find_actual_bounds(ws)
+        # 防御：如果全表为空，使用0
+        if max_row <= 0 or max_col <= 0:
+            max_row = 0
+            max_col = 0
 
         merged_ranges = ExcelLoader.get_merged_ranges(ws)
 
@@ -108,8 +138,8 @@ class ExcelLoader:
         if max_row <= 0 or max_col <= 0:
             return SheetData(
                 worksheet=ws,
-                max_row=max_row,
-                max_col=max_col,
+                max_row=0,
+                max_col=0,
                 values=[],
                 cached_values=None,
                 merged_ranges=merged_ranges,

@@ -1,4 +1,4 @@
-"""后台工作线程模块 — CompareWorker / MergeWorker(QThread)。
+"""后台工作线程模块 — CompareWorker / MergeWorker / SheetDiffSummaryWorker(QThread)。
 
 将耗时的表格比较/合并操作放到后台线程执行，避免阻塞 UI 主线程，
 并通过信号向主线程推送进度日志与最终结果。
@@ -8,17 +8,17 @@
 - extract_sheet_data 为 O(rows*cols)，对 10000x50 数据集约 0.5s 级别。
 - ExcelComparator.compare_sheets 为 O(rows*cols)（key 对齐借助 dict 查找），
   10000x50 实测 < 1s；大文件瓶颈主要在 openpyxl 的 XML 解析与样式复制。
-- 这里不做“跳过空行/裁剪”之类的优化，否则会破坏行对齐语义。
+- 这里不做"跳过空行/裁剪"之类的优化，否则会破坏行对齐语义。
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import QThread, Signal
 
 from src.core.comparator import DiffResult, ExcelComparator
-from src.core.excel_loader import SheetData
+from src.core.excel_loader import ExcelLoader, SheetData
 
 
 class CompareWorker(QThread):
@@ -135,3 +135,86 @@ class MergeWorker(QThread):
         except Exception as e:  # noqa: BLE001
             self.log.emit("error", f"合并失败: {e}")
             self.error.emit(str(e))
+
+
+class SheetDiffSummaryWorker(QThread):
+    """全工作簿逐Sheet差异预计算后台线程。
+
+    用于在文件加载完成后，后台静默遍历所有Sheet计算差异状态，
+    更新底部标签栏红点提示，避免在UI主线程执行导致无响应。
+
+    信号：
+    - progress(int, int): (当前完成sheet数, 总sheet数)
+    - sheet_result(str, bool): (sheet名称, 是否有差异)，每个sheet计算完成立即发射
+    - finished_ok(): 全部sheet计算完成时发射
+    """
+
+    progress = Signal(int, int)
+    sheet_result = Signal(str, bool)
+    finished_ok = Signal()
+
+    def __init__(
+        self,
+        left_wb,
+        right_wb,
+        left_wb_cached=None,
+        right_wb_cached=None,
+        key_cols=None,
+        ignore_cols=None,
+    ) -> None:
+        super().__init__()
+        self.left_wb = left_wb
+        self.right_wb = right_wb
+        self.left_wb_cached = left_wb_cached
+        self.right_wb_cached = right_wb_cached
+        self.key_cols = list(key_cols) if key_cols else []
+        self.ignore_cols = list(ignore_cols) if ignore_cols else []
+
+    def run(self) -> None:  # noqa: D401
+        """线程入口 —— 遍历所有Sheet计算差异状态。"""
+        try:
+            left_names = set(ExcelLoader.get_sheet_names(self.left_wb))
+            right_names = set(ExcelLoader.get_sheet_names(self.right_wb))
+            all_names = list(left_names | right_names)
+            total = len(all_names)
+
+            for idx, name in enumerate(all_names):
+                self.progress.emit(idx, total)
+                try:
+                    # 仅一侧存在的Sheet直接标记为有差异
+                    if name not in left_names or name not in right_names:
+                        self.sheet_result.emit(name, True)
+                        continue
+
+                    # 双侧都存在：提取数据并比较
+                    lws = ExcelLoader.get_worksheet(self.left_wb, name)
+                    rws = ExcelLoader.get_worksheet(self.right_wb, name)
+                    lcached = None
+                    rcached = None
+                    if (self.left_wb_cached is not None
+                            and name in self.left_wb_cached.sheetnames):
+                        lcached = ExcelLoader.get_worksheet(
+                            self.left_wb_cached, name
+                        )
+                    if (self.right_wb_cached is not None
+                            and name in self.right_wb_cached.sheetnames):
+                        rcached = ExcelLoader.get_worksheet(
+                            self.right_wb_cached, name
+                        )
+
+                    ldata = ExcelLoader.extract_sheet_data(lws, lcached)
+                    rdata = ExcelLoader.extract_sheet_data(rws, rcached)
+                    diff = ExcelComparator.compare_sheets(
+                        ldata, rdata, self.key_cols, self.ignore_cols
+                    )
+                    s = diff.stats
+                    has_diff = (
+                        s["different"] + s["left_only"] + s["right_only"] > 0
+                    )
+                    self.sheet_result.emit(name, has_diff)
+                except Exception:  # noqa: BLE001
+                    # 单个sheet失败不影响整体，标记为有差异
+                    self.sheet_result.emit(name, True)
+            self.progress.emit(total, total)
+        finally:
+            self.finished_ok.emit()

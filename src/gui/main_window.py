@@ -311,6 +311,10 @@ class MainWindow(QMainWindow):
         self.action_about.triggered.connect(self.about)
         m_help.addAction(self.action_about)
 
+        self.action_license = QAction("许可证状态", self)
+        self.action_license.triggered.connect(self.show_license_status)
+        m_help.addAction(self.action_license)
+
         self.action_shortcuts = QAction("快捷键列表", self)
         self.action_shortcuts.triggered.connect(self.show_shortcuts)
         m_help.addAction(self.action_shortcuts)
@@ -2325,6 +2329,45 @@ class MainWindow(QMainWindow):
             "文件格式：仅支持 Microsoft Excel 2007+ 的 .xlsx 格式。\n"
             "旧版 .xls 文件请先在 Excel 中另存为 .xlsx。",
         )
+
+    def show_license_status(self) -> None:
+        """展示当前许可证激活状态，并提供解除激活入口。"""
+        from src.utils import license
+
+        machine_code = license.get_machine_code()
+        info = license.activation_info()
+        if info and license.is_activated():
+            key = info.get("key", "")
+            at = info.get("activated_at", "")
+            box = QMessageBox(self)
+            box.setWindowTitle("许可证状态")
+            box.setIcon(QMessageBox.Information)
+            box.setText(
+                f"软件已激活（一机一码）\n\n"
+                f"本机机器码: {machine_code}\n"
+                f"密匙: {key}\n"
+                f"激活时间: {at}"
+            )
+            ok_btn = box.addButton("确定", QMessageBox.AcceptRole)
+            deact_btn = box.addButton("解除激活", QMessageBox.DestructiveRole)
+            # 显式设置 Escape 按钮：窗口 X 关闭按钮与 Escape 键会触发它，
+            # 否则因无 RejectRole 按钮会导致 X 无法关闭弹窗。
+            box.setEscapeButton(ok_btn)
+            box.exec()
+            if box.clickedButton() is deact_btn:
+                if license.deactivate():
+                    QMessageBox.information(
+                        self, "许可证",
+                        "已解除激活，重启后将要求重新输入密匙。",
+                    )
+                else:
+                    QMessageBox.warning(self, "许可证", "解除激活失败。")
+        else:
+            QMessageBox.information(
+                self, "许可证状态",
+                f"软件未激活。\n\n本机机器码: {machine_code}\n"
+                "请将机器码发送给开发者获取专属密匙。",
+            )
 
     def show_shortcuts(self) -> None:
         QMessageBox.information(

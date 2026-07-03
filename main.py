@@ -12,10 +12,12 @@ from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
+from src.gui.license_dialog import LicenseDialog
 from src.gui.main_window import MainWindow
 from src.gui.themes import apply_theme
+from src.utils import license
 
 
 def _set_macos_process_name(name: str) -> None:
@@ -120,6 +122,12 @@ def main() -> int:
 
     # 应用浅色/深色主题（Task 6.4 / Task 11.2）
     apply_theme(app)
+
+    # 密匙激活校验：未激活则弹出激活对话框，取消激活则退出应用
+    if not license.is_activated():
+        dlg = LicenseDialog()
+        if dlg.exec() != QDialog.Accepted:
+            return 0
 
     window = MainWindow()
 

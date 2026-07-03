@@ -319,7 +319,7 @@ class MainWindow(QMainWindow):
     # 工具栏
     # ------------------------------------------------------------------ #
     def _init_toolbar(self) -> None:
-        """构建水平工具栏：打开左/打开右/保存/交换/上一个差异/下一个差异/统计/列设置/合并。"""
+        """构建水平工具栏：打开左/打开右/保存/交换/上一个差异/下一个差异/统计/列设置/调整列宽/合并。"""
         self.toolbar = QToolBar("主工具栏", self)
         self.toolbar.setMovable(False)
         self.toolbar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
@@ -353,6 +353,9 @@ class MainWindow(QMainWindow):
         )
         self.tb_column_settings = self.toolbar.addAction(
             icon(QStyle.SP_FileDialogDetailedView), "列设置", self.open_column_settings
+        )
+        self.tb_resize_columns = self.toolbar.addAction(
+            icon(QStyle.SP_FileDialogContentsView), "调整列宽", self.resize_columns
         )
         self.tb_merge = self.toolbar.addAction(
             icon(QStyle.SP_DialogApplyButton), "合并", self.merge

@@ -38,6 +38,30 @@ def _set_macos_process_name(name: str) -> None:
         pass
 
 
+def _activate_macos_app() -> None:
+    """macOS 上强制激活应用为前台应用，确保菜单栏正确切换。
+
+    当通过另一个应用（如 SourceTree）启动时，直接执行 Unix 二进制不会自动
+    激活为前台应用，菜单栏仍然显示启动方的菜单。此函数通过 AppleScript
+    调用 System Events 来激活 ExcelMerge 应用到前台。
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import subprocess
+        # 使用AppleScript激活应用，这是macOS上最可靠的方式
+        script = 'tell application "System Events" to set frontmost of the first process whose unix id is {pid} to true'.format(
+            pid=os.getpid()
+        )
+        subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _parse_cli_args(argv: List[str]) -> Tuple[Optional[str], Optional[str]]:
     """解析命令行参数，提取左右两个文件路径。
 
@@ -109,6 +133,10 @@ def main() -> int:
         QTimer.singleShot(0, _load_files)
 
     window.show()
+
+    # macOS: 通过其他应用（如SourceTree）启动时，延迟激活应用到前台，确保菜单栏切换
+    if sys.platform == "darwin":
+        QTimer.singleShot(100, _activate_macos_app)
 
     return app.exec()
 

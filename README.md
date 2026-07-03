@@ -13,6 +13,7 @@
 
 - [Introduction](#introduction)
 - [Features](#features)
+- [Core Modules](#core-modules)
 - [Quick Start](#quick-start)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -38,6 +39,45 @@ This project currently uses Python, PySide6, and openpyxl to provide a GUI-based
 - Review differences visually in the GUI, navigate changed regions, and confirm merge actions manually.
 - Package desktop builds for macOS and Windows with the scripts under `packaging/`.
 - Cover the core pipeline with automated tests under `tests/`.
+
+<a id="core-modules"></a>
+## Core Modules
+
+The main window is the central workspace of `Excel Merge`. It combines file loading, side-by-side comparison, diff navigation, and merge actions in one focused view.
+
+<p>
+  <img src="./iScreen%20Shoter%20-%20Python%20-%20260703141432.png" alt="Excel Merge main window showing a side-by-side worksheet comparison and merge workspace" width="100%" />
+</p>
+
+### 1. Workbook Loading and Sheet Switching
+
+- **What it does:** Loads the left and right `.xlsx` workbooks and lets users switch worksheets independently to compare the exact tabs they care about.
+- **Core value:** Reduces setup friction and makes it practical to inspect multi-sheet Excel files without rewriting or pre-processing the source files.
+- **Typical scenarios:** Comparing monthly reports, validating two workbook versions from different teams, or checking whether a newly delivered workbook matches an existing baseline.
+
+### 2. Intelligent Difference Detection
+
+- **What it does:** Compares worksheet content with header-aware and content-aware alignment so row or column changes can still be identified even when data has shifted.
+- **Core value:** Helps users locate real business differences instead of manually scanning large tables cell by cell.
+- **Typical scenarios:** Detecting inserted rows, changed metrics, missing records, reordered columns, or unexpected value changes in structured spreadsheets.
+
+### 3. Visual Diff Review and Navigation
+
+- **What it does:** Highlights changed areas in the GUI and supports fast navigation across difference positions in the current comparison session.
+- **Core value:** Makes large spreadsheets readable and reviewable, especially when the changed cells are scattered across hundreds of rows.
+- **Typical scenarios:** Reviewing audit changes, checking operational data corrections, or quickly locating the next issue during manual verification.
+
+### 4. Merge Decision and Data Synchronization
+
+- **What it does:** Supports merge actions such as right-to-left overwrite, left-to-right overwrite, and append-based updates after users review the detected differences.
+- **Core value:** Turns comparison results into actionable updates, reducing repetitive copy-paste work and lowering the risk of manual merge mistakes.
+- **Typical scenarios:** Merging vendor updates into a master workbook, applying reviewed corrections, or appending newly added records into the target file.
+
+### 5. Local Packaging and Verification Support
+
+- **What it does:** Provides local packaging scripts for macOS and Windows, along with automated tests for the core comparison and merge pipeline.
+- **Core value:** Improves maintainability and helps contributors validate functionality before distributing or extending the application.
+- **Typical scenarios:** Preparing internal delivery builds, validating a change before release, or onboarding new contributors who need a reliable local verification flow.
 
 <a id="quick-start"></a>
 ## Quick Start

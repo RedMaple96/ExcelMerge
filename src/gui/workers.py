@@ -179,6 +179,9 @@ class SheetDiffSummaryWorker(QThread):
             total = len(all_names)
 
             for idx, name in enumerate(all_names):
+                # 应用退出/重新加载时尽快让出，避免 wait() 长时间阻塞 UI
+                if self.isInterruptionRequested():
+                    break
                 self.progress.emit(idx, total)
                 try:
                     # 仅一侧存在的Sheet直接标记为有差异
@@ -207,14 +210,12 @@ class SheetDiffSummaryWorker(QThread):
                     diff = ExcelComparator.compare_sheets(
                         ldata, rdata, self.key_cols, self.ignore_cols
                     )
-                    s = diff.stats
-                    has_diff = (
-                        s["different"] + s["left_only"] + s["right_only"] > 0
-                    )
+                    has_diff = diff.has_differences()
                     self.sheet_result.emit(name, has_diff)
                 except Exception:  # noqa: BLE001
                     # 单个sheet失败不影响整体，标记为有差异
                     self.sheet_result.emit(name, True)
-            self.progress.emit(total, total)
+            if not self.isInterruptionRequested():
+                self.progress.emit(total, total)
         finally:
             self.finished_ok.emit()

@@ -121,7 +121,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-如果需要生成可分发构建产物，请先在本地验证 GUI 行为、文件读写权限与目标平台兼容性，再执行打包脚本。macOS 脚本会生成 `dist/Excel Merge.app`，并在安装了 `create-dmg` 时额外生成 `dist/Excel Merge.dmg`；Windows 脚本会生成 `dist/Excel Merge.exe`。
+如果需要生成可分发构建产物，请先在本地验证 GUI 行为、文件读写权限与目标平台兼容性，再执行打包脚本。macOS 脚本会生成 `dist/ExcelMerge.app`，并在安装了 `create-dmg` 时额外生成 `dist/ExcelMerge.dmg`；Windows 脚本会生成 `dist/Excel Merge.exe`。
 
 <a id="usage-examples"></a>
 ## 使用示例

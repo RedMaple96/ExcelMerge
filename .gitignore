@@ -13,6 +13,7 @@ env/
 build/
 dist/
 *.spec
+!ExcelMerge.spec
 .pyinstaller_cache/
 .pyi_cache/
 

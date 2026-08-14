@@ -94,19 +94,20 @@ class ExcelComparatorTest(unittest.TestCase):
         self.assertEqual(result.aligned_rows[1].diff_cells, [])
         self.assertEqual(result.stats["left_only"], 1)
 
-    # 4. 关键列对齐，右侧独占（左侧缺失某 key）
+    # 4. 关键列对齐，右侧独占（左侧缺失某 key）：
+    #    right_only 行按其在右侧的原始位置插入对齐序列（保序显示）
     def test_key_alignment_right_only(self):
         left = self._make_sheet([["1", "a"], ["3", "c"]])
         right = self._make_sheet([["1", "a"], ["2", "b"], ["3", "c"]])
         result = ExcelComparator.compare_sheets(left, right, key_cols=[0])
 
         # 左侧行先按 key 配对：left[0]<->right[0](key1)、left[1]<->right[2](key3)
-        # 右侧未被消费的行（key2，位于 right 第 1 行）追加到末尾 -> right_only
+        # 右侧未被消费的行（key2，位于 right 第 1 行）按原始位置插入 -> right_only
         statuses = [rp.status for rp in result.aligned_rows]
-        self.assertEqual(statuses, ["same", "same", "right_only"])
-        self.assertEqual(result.aligned_rows[1].right_row, 2)  # key3 在右侧第 2 行
-        self.assertEqual(result.aligned_rows[2].right_row, 1)  # key2 在右侧第 1 行
-        self.assertIsNone(result.aligned_rows[2].left_row)
+        self.assertEqual(statuses, ["same", "right_only", "same"])
+        self.assertEqual(result.aligned_rows[1].right_row, 1)  # key2 在右侧第 1 行
+        self.assertIsNone(result.aligned_rows[1].left_row)
+        self.assertEqual(result.aligned_rows[2].right_row, 2)  # key3 在右侧第 2 行
         self.assertEqual(result.stats["right_only"], 1)
 
     # 5. 关键列对齐，行被打乱重排 -> 按 key 匹配而非位置
@@ -152,17 +153,98 @@ class ExcelComparatorTest(unittest.TestCase):
         result2 = ExcelComparator.compare_sheets(left2, right2)
         self.assertEqual(result2.aligned_rows[0].status, "same")
 
-    # 8. 不同 max_col：缺省列视为 ""
+    # 8. 不同 max_col：多出的列作为 right_only 列单独显示，同内容行不错位
     def test_different_max_col(self):
         left = self._make_sheet([["a", "b"]], max_col=2)
         right = self._make_sheet([["a", "b", "c"]], max_col=3)
         result = ExcelComparator.compare_sheets(left, right)
 
         self.assertEqual(result.max_col, 3)
-        self.assertEqual(result.aligned_rows[0].status, "different")
-        # 第 3 列（索引 2）：左侧缺省 "" vs 右侧 "c"
-        self.assertIn(2, result.aligned_rows[0].diff_cells)
-        self.assertEqual(result.diff_cell_set, {(0, 2)})
+        # 同内容列 A/B 对齐为 same，多出的 C 列是 right_only，不把行误判为不同
+        self.assertEqual(result.aligned_rows[0].status, "same")
+        self.assertEqual(result.diff_cell_set, set())
+        self.assertEqual(
+            [(c.label, c.status) for c in result.aligned_cols],
+            [("a", "same"), ("b", "same"), ("c", "right_only")],
+        )
+
+    # 8b. 需求场景：左 A/B/D、右 A/B/C/D，中间多出的 C 列不错位
+    def test_extra_column_in_middle_keeps_alignment(self):
+        left = self._make_sheet([["A", "B", "D"], ["1", "2", "4"]])
+        right = self._make_sheet(
+            [["A", "B", "C", "D"], ["1", "2", "3", "4"]]
+        )
+        result = ExcelComparator.compare_sheets(left, right)
+
+        self.assertEqual(
+            [(c.label, c.status) for c in result.aligned_cols],
+            [("A", "same"), ("B", "same"), ("C", "right_only"), ("D", "same")],
+        )
+        # A/B/D 三列内容相同，行必须为 same，不能因 C 列错位
+        self.assertEqual(result.aligned_rows[0].status, "same")
+        self.assertEqual(result.stats["same"], 2)
+        self.assertEqual(result.stats["different"], 0)
+
+    # 8c. 列整体重排：按列名对齐，同内容不错位
+    def test_column_reorder_alignment(self):
+        left = self._make_sheet(
+            [["C", "B", "A"], ["3", "2", "1"], ["6", "5", "4"]]
+        )
+        right = self._make_sheet(
+            [["A", "B", "C"], ["1", "2", "3"], ["4", "5", "6"]]
+        )
+        result = ExcelComparator.compare_sheets(left, right)
+
+        # 同名列对齐：C<->C、B<->B、A<->A，不按位置错位
+        self.assertEqual(
+            [(c.left_col, c.right_col) for c in result.aligned_cols],
+            [(0, 2), (1, 1), (2, 0)],
+        )
+        self.assertTrue(all(rp.status == "same" for rp in result.aligned_rows))
+
+    # 8d. 首行是摘要/标题、真正表头在后；右侧末尾多一列时不得错位
+    def test_trailing_extra_column_with_summary_header_rows(self):
+        left = self._make_sheet(
+            [
+                ["A", "B", "C", "", ""],
+                ["x", "x", "x", "", ""],
+                ["//", "", "", "", ""],
+                ["", "", "", "", ""],
+                ["", "", "", "", ""],
+                ["h1", "h2", "h3", "h4", "h5"],
+                ["1", "2", "3", "4", "5"],
+            ],
+            max_col=5,
+        )
+        right = self._make_sheet(
+            [
+                ["A", "B", "C", "", "", ""],
+                ["x", "x", "x", "", "", ""],
+                ["//", "", "", "", "", ""],
+                ["", "", "", "", "", ""],
+                ["", "", "", "", "", ""],
+                ["h1", "h2", "h3", "h4", "h5", "h6"],
+                ["1", "2", "3", "4", "5", "6"],
+            ],
+            max_col=6,
+        )
+        result = ExcelComparator.compare_sheets(left, right)
+
+        # 应自动选中第 6 行（真实表头）做列对齐：h1..h5 same、h6 right_only
+        self.assertEqual(
+            [(c.label, c.status) for c in result.aligned_cols],
+            [
+                ("h1", "same"),
+                ("h2", "same"),
+                ("h3", "same"),
+                ("h4", "same"),
+                ("h5", "same"),
+                ("h6", "right_only"),
+            ],
+        )
+        # 同内容行不受新增列影响，全部 same
+        self.assertTrue(all(rp.status == "same" for rp in result.aligned_rows))
+        self.assertEqual(result.stats["different"], 0)
 
     # 9. 合并单元格值：SheetData.values 已填充合并区域，比较应正常工作
     def test_merged_cell_values(self):
@@ -256,6 +338,31 @@ class ExcelComparatorTest(unittest.TestCase):
         self.assertEqual(by_key[1].status, "different")
         self.assertEqual(by_key[1].diff_cells, [2])
         self.assertEqual(by_key[1].right_row, 0)  # k2 在右侧位于第 0 行
+
+    # 补充：has_differences 必须覆盖"仅新增/删除列"的场景（红点判定用）
+    def test_has_differences_includes_column_only(self):
+        # 右侧只多一列：行全部 same，但列层面有 right_only 差异
+        left = self._make_sheet([["A", "B", "C"], ["1", "2", "3"]])
+        right = self._make_sheet(
+            [["A", "B", "C", "D"], ["1", "2", "3", "4"]]
+        )
+        result = ExcelComparator.compare_sheets(left, right)
+        self.assertTrue(result.has_differences())
+
+        # 左侧只多一列：left_only 同样算差异
+        result2 = ExcelComparator.compare_sheets(right, left)
+        self.assertTrue(result2.has_differences())
+
+        # 完全相同时为 False
+        same = ExcelComparator.compare_sheets(left, left)
+        self.assertFalse(same.has_differences())
+
+        # 行内容差异也应为 True
+        row_diff = ExcelComparator.compare_sheets(
+            self._make_sheet([["A"], ["1"]]),
+            self._make_sheet([["A"], ["2"]]),
+        )
+        self.assertTrue(row_diff.has_differences())
 
 
 if __name__ == "__main__":

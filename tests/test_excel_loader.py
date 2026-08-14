@@ -171,7 +171,7 @@ class ExcelLoaderTest(unittest.TestCase):
         # 中间空单元格 B1 应为 ""
         self.assertEqual(data.values[0][1], "")
 
-    # 补充：bool / None 字符串化规则
+    # 补充：bool / None 字符串化规则；尾部全空列不参与边界（裁剪）
     def test_stringify_bool_and_none(self):
         wb = Workbook()
         ws = wb.active
@@ -181,7 +181,19 @@ class ExcelLoaderTest(unittest.TestCase):
         data = ExcelLoader.extract_sheet_data(ws)
         self.assertEqual(data.values[0][0], "TRUE")
         self.assertEqual(data.values[0][1], "FALSE")
-        self.assertEqual(data.values[0][2], "")
+        # C1 为 None，属于尾部全空列，不进入数据边界
+        self.assertEqual(data.max_col, 2)
+        self.assertEqual(len(data.values[0]), 2)
+
+    # 补充：整数值 float 归一化，避免 1 vs 1.0 的假差异
+    def test_integral_float_normalized(self):
+        wb = Workbook()
+        ws = wb.active
+        ws["A1"] = 1
+        ws["B1"] = 1.0
+        ws["C1"] = 2.5
+        data = ExcelLoader.extract_sheet_data(ws)
+        self.assertEqual(data.values[0], ["1", "1", "2.5"])
 
     # 补充：copy_cell_value 公式与普通值分支
     def test_copy_cell_value_formula_and_plain(self):

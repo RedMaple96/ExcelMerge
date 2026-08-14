@@ -123,7 +123,7 @@ python main.py
 ```
 
 If you need distributable artifacts, validate the GUI behavior, file permissions, and target platform compatibility locally before running the packaging script.
-The macOS script builds `dist/Excel Merge.app` and optionally `dist/Excel Merge.dmg`, while the Windows script builds `dist/Excel Merge.exe`.
+The macOS script builds `dist/ExcelMerge.app` and optionally `dist/ExcelMerge.dmg`, while the Windows script builds `dist/Excel Merge.exe`.
 
 <a id="usage-examples"></a>
 ## Usage Examples

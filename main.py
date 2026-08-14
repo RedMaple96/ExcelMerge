@@ -10,7 +10,7 @@ import os
 import sys
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -104,12 +104,6 @@ def main() -> int:
 
     # 解析命令行参数
     left_path, right_path = _parse_cli_args(sys.argv)
-
-    # macOS 高分屏支持
-    if hasattr(Qt, "AA_EnableHighDpiScaling"):
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(Qt, "AA_UseHighDpiPixmaps"):
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("ExcelMerge")

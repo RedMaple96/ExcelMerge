@@ -351,6 +351,121 @@ class ExcelMergerTest(unittest.TestCase):
         self.assertIn((2, 1, 3, 2), _merged_tuples(target.worksheet))
         self.assertEqual(target.worksheet["A2"].value, "top")
 
+    # 回归：插入行时，目标侧原有合并区域按 Excel 语义移动/扩展
+    def test_merged_ranges_adjusted_on_row_insert(self):
+        wb_s = Workbook()
+        ws_s = wb_s.active
+        ws_s["A1"] = "plain"
+        wb_t = Workbook()
+        ws_t = wb_t.active
+        ws_t.merge_cells("A1:B1")   # 插入行上方：不变
+        ws_t.merge_cells("C3:D4")   # 插入行下方：下移
+        ws_t.merge_cells("E2:F3")   # 以插入行为顶：下移
+
+        source = ExcelLoader.extract_sheet_data(ws_s)
+        target = ExcelLoader.extract_sheet_data(ws_t)
+        ExcelMerger.insert_row_to_other(source, 0, target, 1, 6)
+
+        self.assertEqual(
+            sorted(_merged_tuples(ws_t)),
+            sorted([(1, 1, 1, 2), (3, 5, 4, 6), (4, 3, 5, 4)]),
+        )
+
+    # 回归：插入行跨越合并区域中部时，该区域向下扩展
+    def test_merged_range_extends_on_row_insert_inside(self):
+        wb_s = Workbook()
+        ws_s = wb_s.active
+        ws_s["A1"] = "plain"
+        wb_t = Workbook()
+        ws_t = wb_t.active
+        ws_t.merge_cells("E1:F2")   # 跨第 1-2 行，插入行 2 位于其中
+
+        source = ExcelLoader.extract_sheet_data(ws_s)
+        target = ExcelLoader.extract_sheet_data(ws_t)
+        ExcelMerger.insert_row_to_other(source, 0, target, 1, 6)
+
+        self.assertEqual(_merged_tuples(ws_t), [(1, 5, 3, 6)])
+
+    # 回归：删除行时，目标侧合并区域按 Excel 语义收缩/上移
+    def test_merged_ranges_adjusted_on_row_delete(self):
+        wb = Workbook()
+        ws = wb.active
+        ws.merge_cells("A1:B1")   # 上方：不变
+        ws.merge_cells("C2:D4")   # 包含删除行 3：收缩
+        ws.merge_cells("E5:F5")   # 下方：上移
+        data = ExcelLoader.extract_sheet_data(ws)
+
+        ExcelMerger.delete_row(data, 2)  # 删除第 3 行
+
+        self.assertEqual(
+            sorted(_merged_tuples(ws)),
+            sorted([(1, 1, 1, 2), (2, 3, 3, 4), (4, 5, 4, 6)]),
+        )
+
+    # 回归：删除列时，目标侧合并区域按 Excel 语义收缩/左移
+    def test_merged_ranges_adjusted_on_col_delete(self):
+        wb = Workbook()
+        ws = wb.active
+        ws.merge_cells("A1:A3")   # 左侧：不变
+        ws.merge_cells("B2:D2")   # 包含删除列 3：收缩
+        ws.merge_cells("E1:E1")   # 右侧：左移
+        data = ExcelLoader.extract_sheet_data(ws)
+
+        ExcelMerger.delete_column(data, 2)  # 删除第 3 列
+
+        self.assertEqual(
+            sorted(_merged_tuples(ws)),
+            sorted([(1, 1, 3, 1), (2, 2, 2, 3), (1, 4, 1, 4)]),
+        )
+
+    # 回归：覆盖写入合并区域非左上角时，先解除合并再写入
+    def test_overwrite_merged_cell_unmerges_first(self):
+        wb_s = Workbook()
+        ws_s = wb_s.active
+        ws_s["B1"] = "new"
+        wb_t = Workbook()
+        ws_t = wb_t.active
+        ws_t["A1"] = "top"
+        ws_t.merge_cells("A1:B2")
+
+        source = ExcelLoader.extract_sheet_data(ws_s)
+        target = ExcelLoader.extract_sheet_data(ws_t)
+        ExcelMerger.copy_single_cell(source, 0, 1, target, 0)
+
+        self.assertEqual(_merged_tuples(ws_t), [])
+        self.assertEqual(ws_t["A1"].value, "top")
+        self.assertEqual(ws_t["B1"].value, "new")
+
+    # 回归：两侧列结构不同时，右覆盖先同步独占列，再按对齐列插入行，不错位
+    def test_right_cover_syncs_columns_then_rows(self):
+        wb_l = Workbook()
+        ws_l = wb_l.active
+        ws_l.append(["A", "B", "D"])        # 左无 C 列
+        ws_l.append(["k1", "b1", "d1"])
+        wb_r = Workbook()
+        ws_r = wb_r.active
+        ws_r.append(["A", "B", "C", "D"])   # 右多 C 列
+        ws_r.append(["k1", "b1", "c1", "d1"])
+        ws_r.append(["k2", "b2", "c2", "d2"])  # right_only 行
+
+        left = ExcelLoader.extract_sheet_data(ws_l)
+        right = ExcelLoader.extract_sheet_data(ws_r)
+        diff = ExcelComparator.compare_sheets(left, right, key_cols=[0])
+
+        # 表头行与 k1 行按 key 配对，k2 行在末尾为 right_only
+        self.assertEqual(diff.aligned_rows[2].status, "right_only")
+        ExcelMerger.merge_right_to_left(diff, left, right)
+
+        # 右侧独占列 C 被插入到左侧对应位置，表头与匹配行数据一并同步
+        self.assertEqual(ws_l.max_column, 4)
+        self.assertEqual(ws_l["C1"].value, "C")
+        self.assertEqual(ws_l["C2"].value, "c1")
+        # 新增行 k2 的 A/B/C/D 全部落在正确的列
+        self.assertEqual(ws_l["A3"].value, "k2")
+        self.assertEqual(ws_l["B3"].value, "b2")
+        self.assertEqual(ws_l["C3"].value, "c2")
+        self.assertEqual(ws_l["D3"].value, "d2")
+
 
 if __name__ == "__main__":
     unittest.main()

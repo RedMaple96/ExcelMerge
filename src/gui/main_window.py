@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 from openpyxl.utils import get_column_letter
 
+from src.core.chardiff import char_diff_ranges
 from src.core.comparator import ColPair, DiffResult, ExcelComparator
 from src.core.excel_loader import ExcelLoader, SheetData
 from src.core.merger import ExcelMerger
@@ -53,6 +54,10 @@ from src.gui.bottom_bar import BottomBar
 from src.gui.column_settings_dialog import ColumnSettingsDialog
 from src.gui.diff_birds_eye import DiffBirdsEyeView
 from src.gui.diff_col_birds_eye import DiffColBirdsEyeView
+from src.gui.diff_highlight_delegate import (
+    HIGHLIGHT_RANGES_ROLE,
+    DiffHighlightDelegate,
+)
 from src.gui.themes import is_dark_mode
 from src.gui.workers import CompareWorker, SheetDiffSummaryWorker
 
@@ -192,6 +197,8 @@ class MainWindow(QMainWindow):
         # ExtendedSelection + SelectItems：支持 Ctrl/Shift 多选单元格，便于批量复制
         table.setSelectionMode(QTableWidget.ExtendedSelection)
         table.setSelectionBehavior(QTableWidget.SelectItems)
+        # 单元格内字符级差异高亮（只高亮差异片段）
+        table.setItemDelegate(DiffHighlightDelegate(table))
         table.setAlternatingRowColors(False)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         # 行号：使用 verticalHeader，可由 show_row_numbers 切换显隐
@@ -537,6 +544,12 @@ class MainWindow(QMainWindow):
                 f"找不到文件:\n{path}",
             )
             return
+
+        # 覆盖已有侧前检查未保存修改，避免静默丢失用户已完成的合并
+        existing_path = self.left_path if side == "left" else self.right_path
+        if existing_path and self._dirty[side]:
+            if not self._check_unsaved_before_switch():
+                return
 
         try:
             wb = ExcelLoader.load_workbook(path)
@@ -1084,7 +1097,6 @@ class MainWindow(QMainWindow):
         """根据当前主题返回差异配色字典。
 
         配色方案（参考 Beyond Compare）：
-        - diff_row: 不同行的浅红底色（行级标识）
         - diff_cell: 差异单元格的深红底色（单元格级标识）
         - left_only_row: 仅左侧有的行的蓝色底色（左侧独占）
         - left_only_gap: 仅左侧有的行对应的右侧虚拟空行底色（浅蓝灰）
@@ -1097,7 +1109,6 @@ class MainWindow(QMainWindow):
         dark = is_dark_mode()
         if dark:
             return {
-                "diff_row": QColor("#4A2A2A"),
                 "diff_cell": QColor("#B22222"),
                 "left_only_row": QColor("#1A2A4A"),
                 "left_only_gap": QColor("#1E2A38"),
@@ -1108,7 +1119,6 @@ class MainWindow(QMainWindow):
                 "col_gap": QColor("#252525"),
             }
         return {
-            "diff_row": QColor("#FFE0E0"),
             "diff_cell": QColor("#FF6B6B"),
             "left_only_row": QColor("#D6E4FF"),
             "left_only_gap": QColor("#EEF3FB"),
@@ -1123,12 +1133,11 @@ class MainWindow(QMainWindow):
         """差异可视化 - 根据 aligned_rows 和 aligned_cols 为两侧表格着色。
 
         配色策略（颜色鲜明，便于区分）：
-        - different 行：浅红底 + 差异单元格深红
+        - different 行：差异单元格只对字符级差异片段高亮，其余字符保持原色
         - left_only 行：左侧蓝色（独占），右侧浅蓝灰（虚拟空行）
         - right_only 行：右侧绿色（独占），左侧浅绿灰（虚拟空行）
         - left_only 列：左侧蓝色（独占），右侧浅灰（虚拟空列）
         - right_only 列：右侧绿色（独占），左侧浅灰（虚拟空列）
-        - 行级着色覆盖列级着色（行优先），但独占列的虚拟空侧保持 col_gap
         """
         colors = self._diff_colors()
         transparent = QBrush(Qt.transparent)
@@ -1146,6 +1155,7 @@ class MainWindow(QMainWindow):
                         item = table.item(r, c)
                         if item is not None:
                             item.setBackground(transparent)
+                            item.setData(HIGHLIGHT_RANGES_ROLE, None)
 
             # 2. 无比较结果时直接返回
             if not self.diff_result:
@@ -1183,19 +1193,9 @@ class MainWindow(QMainWindow):
 
                 # 行级着色
                 if status == "different":
-                    # 浅红底 + 差异单元格深红
-                    self._paint_row(self.left_table, i, colors["diff_row"])
-                    self._paint_row(self.right_table, i, colors["diff_row"])
-                    # 差异单元格深红（覆盖行底色）
+                    # 单元格内字符级高亮：只高亮差异片段，保持其它字符原色
                     for c in pair.diff_cells:
-                        self._paint_cell(self.left_table, i, c, colors["diff_cell"])
-                        self._paint_cell(self.right_table, i, c, colors["diff_cell"])
-                    # 独占列的虚拟空侧恢复 col_gap（覆盖行底色）
-                    for c, cp in enumerate(aligned_cols):
-                        if cp.status == "left_only":
-                            self._paint_cell(self.right_table, i, c, colors["col_gap"])
-                        elif cp.status == "right_only":
-                            self._paint_cell(self.left_table, i, c, colors["col_gap"])
+                        self._apply_char_highlight(i, c)
                 elif status == "left_only":
                     # 左侧蓝色（独占行），右侧浅蓝灰（虚拟空行）
                     self._paint_row(self.left_table, i, colors["left_only_row"])
@@ -1211,6 +1211,28 @@ class MainWindow(QMainWindow):
 
         # 同步全局差异缩略图标记
         self._update_birds_eye()
+
+    def _apply_char_highlight(self, row: int, col: int) -> None:
+        """为左右同一对齐位置的差异单元格计算并写入字符级高亮区间。
+
+        文本完全相同时（如缓存值缺失导致的罕见边界）退化为整格高亮，
+        确保差异始终可见。
+        """
+        left_item = self.left_table.item(row, col)
+        right_item = self.right_table.item(row, col)
+        if left_item is None or right_item is None:
+            return
+
+        left_text = left_item.text()
+        right_text = right_item.text()
+        left_ranges, right_ranges = char_diff_ranges(left_text, right_text)
+        if left_ranges or right_ranges:
+            left_item.setData(HIGHLIGHT_RANGES_ROLE, left_ranges or None)
+            right_item.setData(HIGHLIGHT_RANGES_ROLE, right_ranges or None)
+        else:
+            color = self._diff_colors()["diff_cell"]
+            self._paint_cell(self.left_table, row, col, color)
+            self._paint_cell(self.right_table, row, col, color)
 
     def _update_birds_eye(self) -> None:
         """根据当前 diff_result 刷新全局差异缩略图的差异行/列标记。"""
@@ -1493,6 +1515,15 @@ class MainWindow(QMainWindow):
             self.left_sheet_name,
             self.right_sheet_name,
         ) = self.right_sheet_name, self.left_sheet_name
+        # 脏状态与备份状态跟随文件交换，而不是跟随左右位置
+        self._dirty["left"], self._dirty["right"] = (
+            self._dirty["right"],
+            self._dirty["left"],
+        )
+        self._backup_done["left"], self._backup_done["right"] = (
+            self._backup_done["right"],
+            self._backup_done["left"],
+        )
 
         self._swap_combos()
         self._update_file_label("left")
@@ -2532,7 +2563,7 @@ class MainWindow(QMainWindow):
 
         # 停止之前的预计算线程（如果有）
         if self._sheet_summary_worker is not None and self._sheet_summary_worker.isRunning():
-            self._sheet_summary_worker.quit()
+            self._sheet_summary_worker.requestInterruption()
             self._sheet_summary_worker.wait()
 
         # 启动后台线程预计算所有双侧共有Sheet的差异状态
@@ -2589,10 +2620,7 @@ class MainWindow(QMainWindow):
                 diff = ExcelComparator.compare_sheets(
                     ldata, rdata, self.key_cols, self.ignore_cols
                 )
-                s = diff.stats
-                self._sheet_diff_summary[name] = (
-                    s["different"] + s["left_only"] + s["right_only"] > 0
-                )
+                self._sheet_diff_summary[name] = diff.has_differences()
             except Exception:  # noqa: BLE001
                 self._sheet_diff_summary[name] = True
 
@@ -2601,8 +2629,7 @@ class MainWindow(QMainWindow):
         current = self.left_sheet_name or self.right_sheet_name
         if not current:
             return
-        s = result.stats
-        has_diff = s["different"] + s["left_only"] + s["right_only"] > 0
+        has_diff = result.has_differences()
         self._sheet_diff_summary[current] = has_diff
         self.bottom_bar.update_diff_status(
             {n for n, has in self._sheet_diff_summary.items() if has}
@@ -2616,5 +2643,41 @@ class MainWindow(QMainWindow):
         self.status_label.setText(text)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        """关闭窗口：直接接受（Task 9 可能加入未保存确认）。"""
+        """关闭窗口：有未保存修改时提示保存/丢弃/取消，防止静默丢数据。"""
+        dirty_sides = [s for s in ("left", "right") if self._dirty[s]]
+        if not dirty_sides:
+            self._stop_workers_for_quit()
+            event.accept()
+            return
+
+        btn = QMessageBox.question(
+            self,
+            "未保存的修改",
+            "有未保存的修改，是否保存后退出？",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if btn == QMessageBox.Cancel:
+            event.ignore()
+            return
+        if btn == QMessageBox.Save:
+            failures = []
+            for side in dirty_sides:
+                msg = self._save_side(side, quiet=True)
+                if "失败" in msg:
+                    failures.append(msg)
+            if failures:
+                QMessageBox.critical(
+                    self, "保存失败", "以下文件保存失败，未退出：\n" + "\n".join(failures)
+                )
+                event.ignore()
+                return
+        self._stop_workers_for_quit()
         event.accept()
+
+    def _stop_workers_for_quit(self) -> None:
+        """退出前停止并等待后台线程，避免 QThread 随进程销毁而崩溃。"""
+        for worker in (self._compare_worker, self._sheet_summary_worker):
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+                worker.wait()

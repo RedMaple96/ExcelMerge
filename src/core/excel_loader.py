@@ -54,11 +54,22 @@ class ExcelLoader:
 
         - data_only=False：保留公式字符串而非缓存计算值
         - keep_vba=False：不保留 VBA 宏
+        - 仅接受 .xlsx 扩展名（大小写不敏感），其它格式抛 ValueError，
+          避免 openpyxl 抛出难以理解的底层错误。
         - 注意：openpyxl 的 load_workbook 在当前版本没有 keep_styles 参数，
           样式默认就会被保留，因此此处无需也无法显式传入（PRD 中提到的
           keep_styles=True 并非真实参数，样式保留是默认行为）。
         """
+        ExcelLoader._check_xlsx_extension(path)
         return load_workbook(path, data_only=False, keep_vba=False)
+
+    @staticmethod
+    def _check_xlsx_extension(path: str) -> None:
+        """校验文件扩展名为 .xlsx，否则抛出带明确提示的 ValueError。"""
+        if not path.lower().endswith(".xlsx"):
+            raise ValueError(
+                "仅支持 .xlsx 格式，请先将文件另存为 .xlsx 后再打开"
+            )
 
     @staticmethod
     def load_workbook_cached(path: str) -> Workbook:
@@ -68,6 +79,7 @@ class ExcelLoader:
         （而非公式字符串）。配合 load_workbook 使用以同时获取公式与计算值。
         注意：若文件从未被 Excel 打开保存，缓存值可能为 None。
         """
+        ExcelLoader._check_xlsx_extension(path)
         return load_workbook(path, data_only=True, keep_vba=False)
 
     @staticmethod
@@ -100,10 +112,12 @@ class ExcelLoader:
 
         边界判定与 _find_actual_bounds 一致：仅非空（strip 后）单元格计入
         边界，但所有非 None 值单元格（含纯空白）在边界内保留原值。
-        返回 (max_row, max_col, values)；全空时返回 (0, 0, [])。
+        合并单元格区域同样计入边界：合并区域本身是表结构的一部分，即使
+        其左上角为空或区域内只有部分格子有值，也不能被裁剪，否则会造成
+        行列错位（如 A2:C3 合并时 C 列被误判为不存在）。
+
+        返回 (max_row, max_col, values)；全空且无合并区域时返回 (0, 0, [])。
         """
-        if not ws._cells:
-            return 0, 0, []
         cell_map: Dict[Tuple[int, int], str] = {}
         actual_max_row = 0
         actual_max_col = 0
@@ -118,6 +132,12 @@ class ExcelLoader:
                     actual_max_row = row
                 if col > actual_max_col:
                     actual_max_col = col
+        # 合并区域计入边界：防止"只有左上角有值"的合并区域被裁掉列/行
+        for mr in ws.merged_cells.ranges:
+            if mr.max_row > actual_max_row:
+                actual_max_row = mr.max_row
+            if mr.max_col > actual_max_col:
+                actual_max_col = mr.max_col
         if actual_max_row <= 0 or actual_max_col <= 0:
             return 0, 0, []
         values: List[List[str]] = [
@@ -221,6 +241,8 @@ class ExcelLoader:
 
         - None -> ""
         - bool -> "TRUE"/"FALSE"（bool 是 int 子类，必须先于 int 判断）
+        - 整数值的 float（如 1.0）-> "1"，避免 "1" 与 "1.0" 被误判为差异；
+          Excel 常规格式下 1 与 1.0 显示一致，比较时应视为相同
         - 公式（以 "=" 开头的字符串）原样保留
         - ArrayFormula / DataTableFormula 等公式对象：取其 text 属性
           （数组公式文本，如 "=SUM(A1:A2)"），避免 str() 输出对象地址
@@ -230,6 +252,9 @@ class ExcelLoader:
             return ""
         if isinstance(value, bool):
             return "TRUE" if value else "FALSE"
+        # 整数值浮点归一化：1.0 -> "1"，消除数值相等但字面不同的假差异
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
         # ArrayFormula 等公式对象：取 text 属性，避免 str() 输出对象地址
         text = getattr(value, "text", None)
         if text is not None:

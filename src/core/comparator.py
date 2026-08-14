@@ -81,6 +81,25 @@ class DiffResult:
     stats: dict
     max_col: int
 
+    def has_differences(self) -> bool:
+        """是否真的存在任何差异（行差异 + 列结构差异）。
+
+        仅统计行 stats 会漏掉"只新增/删除了列"的场景：此时所有行都是
+        same，行差异为 0，但 left_only/right_only 列本身就是差异，
+        必须在红点等 UI 判定中一并考虑。
+        """
+        row_diff = (
+            self.stats["different"]
+            + self.stats["left_only"]
+            + self.stats["right_only"]
+            > 0
+        )
+        col_diff = any(
+            cp.status in ("left_only", "right_only")
+            for cp in self.aligned_cols
+        )
+        return row_diff or col_diff
+
 
 class ExcelComparator:
     """Excel 差异比较器，全部为静态方法。"""
@@ -185,52 +204,73 @@ class ExcelComparator:
     def _align_columns(
         left: SheetData, right: SheetData
     ) -> List[ColPair]:
-        """基于标题行（第一行）的列名用 LCS 对齐列。
+        """基于自动选择的表头行的列名对齐列。
 
         策略：
-        - 列数不同时：始终用 LCS 对齐（检测列增删/移位）。
-        - 列数相同时：同时计算 LCS 和位置 1:1 配对，取匹配数多的方案。
-          这样能正确处理两种情况：
-          a) 列数相同但列名有数据差异（如表头单元格值不同）→ 位置 1:1 更优
-          b) 列数相同但列被移位（如插入/删除导致后续列平移）→ LCS 更优
+        - 表头行选择：扫描两侧共有行，选"同位置非空且值相等单元格数"最多的
+          一行（同分取最早）。真实文件常有标题/摘要行，第一行未必是表头；
+          只看第一行会让大量空表头参与 LCS，产生歧义并对错列（如把末尾新增列
+          识别成中间新增列）。
+        - 列数不同时：用 LCS 对齐（保序地检测列增删/移位）。
+        - 列数相同时：在三种候选（位置 1:1、LCS、按列名的全局二分匹配）中
+          取匹配数最多的方案，匹配数相同时优先保序方案：
+          a) 表头值有差异（如 "Name" vs "Name "）→ 位置 1:1 更稳
+          b) 列被移位但顺序大体保留 → LCS 更优
+          c) 列被整体重排（如 C,B,A vs A,B,C）→ 全局匹配才能正确对齐，
+             避免"同名列被当成不同列比较"造成的错位
         - 如果任一侧无数据行，返回空列表。
         - 如果 LCS 完全没有匹配（列名完全不同），退化为位置 1:1 配对。
         """
         n_left = left.max_col
         n_right = right.max_col
 
-        # 提取列名（第一行）
+        # 提取列名（自动选择的表头行）
+        header_row = ExcelComparator._select_header_row(left, right)
         left_names: List[str] = []
         right_names: List[str] = []
         if left.values:
-            row0 = left.values[0]
-            left_names = [row0[c] if c < len(row0) else "" for c in range(n_left)]
+            lrow = left.values[header_row]
+            left_names = [lrow[c] if c < len(lrow) else "" for c in range(n_left)]
         if right.values:
-            row0 = right.values[0]
-            right_names = [row0[c] if c < len(row0) else "" for c in range(n_right)]
+            rrow = right.values[header_row]
+            right_names = [rrow[c] if c < len(rrow) else "" for c in range(n_right)]
 
         # 无标题行时退化为顺序配对
         if not left_names and not right_names:
             return []
 
-        # 列数相同：比较 LCS 和位置配对，取匹配多的
+        # 列数相同：在位置配对 / LCS / 全局匹配中取最优
         if n_left == n_right and n_left > 0:
             positional_matches = sum(
                 1 for c in range(n_left) if left_names[c] == right_names[c]
             )
             raw = ExcelComparator._lcs_backtrace(left_names, right_names)
             lcs_matches = sum(1 for item in raw if item[0] == "match")
+            bip_pairs = ExcelComparator._match_columns_bipartite(
+                left_names, right_names
+            )
 
-            # 位置配对匹配数 >= LCS 匹配数 → 用位置 1:1（处理表头数据差异）
-            if positional_matches >= lcs_matches:
+            # (匹配数, 优先级, 方案名)；匹配数相同优先保序方案
+            candidates = [
+                (positional_matches, 2, "positional"),
+                (lcs_matches, 1, "lcs"),
+                (len(bip_pairs), 0, "bipartite"),
+            ]
+            candidates.sort(key=lambda item: (-item[0], -item[1]))
+            best = candidates[0][2]
+
+            if best == "positional":
                 return [
                     ColPair(left_col=c, right_col=c, status="same",
                             label=left_names[c])
                     for c in range(n_left)
                 ]
-            # LCS 匹配数更多 → 列被移位，用 LCS 结果
-            return ExcelComparator._build_col_pairs_from_lcs(
-                raw, left_names, right_names
+            if best == "lcs":
+                return ExcelComparator._build_col_pairs_from_lcs(
+                    raw, left_names, right_names
+                )
+            return ExcelComparator._build_col_pairs_from_matching(
+                bip_pairs, left_names, right_names
             )
 
         # 列数不同：始终用 LCS
@@ -261,6 +301,95 @@ class ExcelComparator:
         return ExcelComparator._build_col_pairs_from_lcs(
             raw, left_names, right_names
         )
+
+    @staticmethod
+    def _select_header_row(left: SheetData, right: SheetData) -> int:
+        """选择用于列对齐的表头行。
+
+        扫描两侧共有的行，返回"同位置非空且值相等的单元格数"最多的一行
+        （同分取最早）。表头行通常列名覆盖完整且两侧一致，得分最高；
+        标题/摘要行只有部分列有值，得分低；数据行即使值相同也不会比
+        更早出现的表头行优先（同分取最早），因此不会误选数据行。
+        """
+        n_rows = min(len(left.values), len(right.values))
+        if n_rows == 0:
+            return 0
+        n_cols = min(left.max_col, right.max_col)
+        best_row = 0
+        best_score = -1
+        for r in range(n_rows):
+            lrow = left.values[r]
+            rrow = right.values[r]
+            score = 0
+            for c in range(n_cols):
+                lv = lrow[c] if c < len(lrow) else ""
+                rv = rrow[c] if c < len(rrow) else ""
+                if lv != "" and lv == rv:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_row = r
+        return best_row
+
+    @staticmethod
+    def _match_columns_bipartite(
+        left_names: List[str], right_names: List[str]
+    ) -> List[Tuple[int, int]]:
+        """按列名做全局贪心匹配（允许列重排），返回 (left_idx, right_idx) 列表。
+
+        对每个左侧列名，在尚未消费的右侧列中选同名且位置最接近的列，
+        既支持整体重排，又尽量保留原有顺序。表头列名通常不重复，
+        此贪心策略即最优匹配；重复列名时也能保持稳定。
+        """
+        unmatched = set(range(len(right_names)))
+        pairs: List[Tuple[int, int]] = []
+        for li, name in enumerate(left_names):
+            best_ri = -1
+            best_dist = None
+            for ri in unmatched:
+                if right_names[ri] != name:
+                    continue
+                dist = abs(ri - li)
+                if best_dist is None or dist < best_dist:
+                    best_ri = ri
+                    best_dist = dist
+            if best_ri >= 0:
+                unmatched.discard(best_ri)
+                pairs.append((li, best_ri))
+        return pairs
+
+    @staticmethod
+    def _build_col_pairs_from_matching(
+        pairs: List[Tuple[int, int]],
+        left_names: List[str],
+        right_names: List[str],
+    ) -> List[ColPair]:
+        """从全局匹配结果构建 ColPair 列表。
+
+        输出顺序以左侧列序为主；未匹配的右侧列追加到末尾，标记 right_only。
+        """
+        pair_map = {li: ri for li, ri in pairs}
+        matched_right = {ri for _li, ri in pairs}
+        aligned_cols: List[ColPair] = []
+        for li in range(len(left_names)):
+            ri = pair_map.get(li)
+            if ri is not None:
+                aligned_cols.append(ColPair(
+                    left_col=li, right_col=ri, status="same",
+                    label=left_names[li],
+                ))
+            else:
+                aligned_cols.append(ColPair(
+                    left_col=li, right_col=None, status="left_only",
+                    label=left_names[li],
+                ))
+        for ri in range(len(right_names)):
+            if ri not in matched_right:
+                aligned_cols.append(ColPair(
+                    left_col=None, right_col=ri, status="right_only",
+                    label=right_names[ri],
+                ))
+        return aligned_cols
 
     @staticmethod
     def _build_col_pairs_from_lcs(

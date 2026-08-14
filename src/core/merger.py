@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+from openpyxl.cell.cell import MergedCell
+from openpyxl.worksheet.worksheet import Worksheet
+
 from src.core.comparator import ColPair, DiffResult, RowPair
 from src.core.excel_loader import ExcelLoader, SheetData
 
@@ -23,6 +26,147 @@ class ExcelMerger:
     所有方法均直接修改传入 SheetData 中的 worksheet 对象（就地修改），
     调用方负责后续保存工作簿。
     """
+
+    # ------------------------------------------------------------------ #
+    # 合并单元格维护（openpyxl 的 insert/delete_rows/cols 不会同步移动
+    # merged ranges，必须按 Excel 语义手动调整，否则会错位甚至丢数据）
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _rebuild_merged_ranges(
+        ws: Worksheet, specs: List[Tuple[int, int, int, int]]
+    ) -> None:
+        """清空并按给定 (min_row, min_col, max_row, max_col) 列表重建合并区域。"""
+        ws.merged_cells.ranges.clear()
+        for min_r, min_c, max_r, max_c in specs:
+            if min_r > max_r or min_c > max_c:
+                continue
+            try:
+                ws.merge_cells(
+                    start_row=min_r,
+                    start_column=min_c,
+                    end_row=max_r,
+                    end_column=max_c,
+                )
+            except Exception:
+                # 重叠区域跳过，避免中断整体流程
+                continue
+
+    @staticmethod
+    def _adjust_merged_ranges_for_row_insert(
+        ws: Worksheet, insert_row: int
+    ) -> None:
+        """行插入前调整合并区域（Excel 语义）。
+
+        - 完全在插入行上方：不变；
+        - 完全在插入行及其下方：整体下移一行；
+        - 跨越插入行：向下扩展一行。
+        """
+        new_specs: List[Tuple[int, int, int, int]] = []
+        for mr in ws.merged_cells.ranges:
+            if mr.max_row < insert_row:
+                new_specs.append(
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+                )
+            elif mr.min_row >= insert_row:
+                new_specs.append(
+                    (mr.min_row + 1, mr.min_col, mr.max_row + 1, mr.max_col)
+                )
+            else:
+                new_specs.append(
+                    (mr.min_row, mr.min_col, mr.max_row + 1, mr.max_col)
+                )
+        ExcelMerger._rebuild_merged_ranges(ws, new_specs)
+
+    @staticmethod
+    def _adjust_merged_ranges_for_row_delete(
+        ws: Worksheet, delete_row: int
+    ) -> None:
+        """行删除前调整合并区域（Excel 语义）。
+
+        - 完全在删除行上方：不变；
+        - 完全在删除行下方：整体上移一行；
+        - 包含删除行：向下收缩一行，收缩后为空则移除。
+        """
+        new_specs: List[Tuple[int, int, int, int]] = []
+        for mr in ws.merged_cells.ranges:
+            if mr.max_row < delete_row:
+                new_specs.append(
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+                )
+            elif mr.min_row > delete_row:
+                new_specs.append(
+                    (mr.min_row - 1, mr.min_col, mr.max_row - 1, mr.max_col)
+                )
+            else:
+                new_max = mr.max_row - 1
+                if new_max >= mr.min_row:
+                    new_specs.append(
+                        (mr.min_row, mr.min_col, new_max, mr.max_col)
+                    )
+        ExcelMerger._rebuild_merged_ranges(ws, new_specs)
+
+    @staticmethod
+    def _adjust_merged_ranges_for_col_insert(
+        ws: Worksheet, insert_col: int
+    ) -> None:
+        """列插入前调整合并区域（镜像行插入语义）。"""
+        new_specs: List[Tuple[int, int, int, int]] = []
+        for mr in ws.merged_cells.ranges:
+            if mr.max_col < insert_col:
+                new_specs.append(
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+                )
+            elif mr.min_col >= insert_col:
+                new_specs.append(
+                    (mr.min_row, mr.min_col + 1, mr.max_row, mr.max_col + 1)
+                )
+            else:
+                new_specs.append(
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col + 1)
+                )
+        ExcelMerger._rebuild_merged_ranges(ws, new_specs)
+
+    @staticmethod
+    def _adjust_merged_ranges_for_col_delete(
+        ws: Worksheet, delete_col: int
+    ) -> None:
+        """列删除前调整合并区域（镜像行删除语义）。"""
+        new_specs: List[Tuple[int, int, int, int]] = []
+        for mr in ws.merged_cells.ranges:
+            if mr.max_col < delete_col:
+                new_specs.append(
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+                )
+            elif mr.min_col > delete_col:
+                new_specs.append(
+                    (mr.min_row, mr.min_col - 1, mr.max_row, mr.max_col - 1)
+                )
+            else:
+                new_max = mr.max_col - 1
+                if new_max >= mr.min_col:
+                    new_specs.append(
+                        (mr.min_row, mr.min_col, mr.max_row, new_max)
+                    )
+        ExcelMerger._rebuild_merged_ranges(ws, new_specs)
+
+    @staticmethod
+    def _ensure_writable_cell(ws: Worksheet, row: int, col: int):
+        """返回可写的目标单元格；若该位置属于某个合并区域，先解除该合并。
+
+        覆盖写入合并单元格的非左上角位置时，openpyxl 返回只读的
+        MergedCell（赋值会抛 AttributeError）。合并工具在这里的语义是
+        "以复制值覆盖"，因此需要先解除阻碍写入的合并区域。
+        """
+        cell = ws.cell(row=row, column=col)
+        if isinstance(cell, MergedCell):
+            for mr in list(ws.merged_cells.ranges):
+                if (
+                    mr.min_row <= row <= mr.max_row
+                    and mr.min_col <= col <= mr.max_col
+                ):
+                    ws.unmerge_cells(str(mr))
+            return ws.cell(row=row, column=col)
+        return cell
 
     @staticmethod
     def _get_cached(
@@ -46,6 +190,45 @@ class ExcelMerger:
         return v if v != "" else None
 
     @staticmethod
+    def _sync_exclusive_columns(
+        diff_result: DiffResult,
+        source: SheetData,
+        target: SheetData,
+        src_is_right: bool,
+    ) -> None:
+        """把 source 侧独占列插入 target 对应位置（从右往左，避免位置偏移）。
+
+        列值按对齐行复制：same/different 行两侧都有数据，复制 source 列值；
+        target 独有行留空。合并前先同步列结构，保证随后插入的行不会因
+        两侧列结构不同而错位或丢数据。
+        """
+        aligned_cols = diff_result.aligned_cols
+        row_mapping: List[Tuple[int, int]] = [
+            (
+                (p.right_row if src_is_right else p.left_row),
+                (p.left_row if src_is_right else p.right_row),
+            )
+            for p in diff_result.aligned_rows
+            if p.status in ("same", "different")
+            and p.left_row is not None
+            and p.right_row is not None
+        ]
+        for aligned_idx in range(len(aligned_cols) - 1, -1, -1):
+            cp = aligned_cols[aligned_idx]
+            src_col = cp.right_col if src_is_right else cp.left_col
+            tgt_col = cp.left_col if src_is_right else cp.right_col
+            if src_col is None or tgt_col is not None:
+                continue
+            insert_idx = sum(
+                1
+                for c in aligned_cols[:aligned_idx]
+                if (c.left_col if src_is_right else c.right_col) is not None
+            )
+            ExcelMerger.insert_column_to_other(
+                source, src_col, target, insert_idx, 0, row_mapping
+            )
+
+    @staticmethod
     def merge_right_to_left(
         diff_result: DiffResult, left: SheetData, right: SheetData
     ) -> None:
@@ -55,42 +238,64 @@ class ExcelMerger:
           使用 aligned_cols 映射到实际列号。
         - "right_only" 行：在左侧对应位置插入新行并复制右侧整行（保持对齐位置，
           而非追加到末尾）。多个插入按从后往前执行，避免位置偏移。
+        - "right_only" 列：先插入左侧对应位置（含表头与匹配行数据），再处理
+          行插入，确保两侧列结构不同时不错位、不丢数据。
         """
         aligned_cols = diff_result.aligned_cols
-        insert_max_col = max(left.max_col, right.max_col)
 
-        # 收集需要插入的 (插入位置0-based, 源行0-based)，从后往前执行
-        inserts: List[Tuple[int, int]] = []
-        for i, pair in enumerate(diff_result.aligned_rows):
-            if pair.status == "different":
-                left_ws_row = pair.left_row + 1
-                right_ws_row = pair.right_row + 1
-                for aligned_col in pair.diff_cells:
-                    if aligned_col >= len(aligned_cols):
-                        continue
-                    cp = aligned_cols[aligned_col]
-                    if cp.status != "same":
-                        continue
-                    src_cell = right.worksheet.cell(
-                        row=right_ws_row, column=cp.right_col + 1
-                    )
-                    tgt_cell = left.worksheet.cell(
-                        row=left_ws_row, column=cp.left_col + 1
-                    )
-                    cached = ExcelMerger._get_cached(
-                        right, pair.right_row, cp.right_col
-                    )
-                    ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
-                    ExcelLoader.copy_cell_style(src_cell, tgt_cell)
-            elif pair.status == "right_only":
-                insert_idx = sum(
-                    1 for p in diff_result.aligned_rows[:i] if p.left_row is not None
+        # 1. 覆盖 different 单元格（必须在插列之前，使用原始列索引）
+        for pair in diff_result.aligned_rows:
+            if pair.status != "different":
+                continue
+            left_ws_row = pair.left_row + 1
+            right_ws_row = pair.right_row + 1
+            for aligned_col in pair.diff_cells:
+                if aligned_col >= len(aligned_cols):
+                    continue
+                cp = aligned_cols[aligned_col]
+                if cp.status != "same":
+                    continue
+                src_cell = right.worksheet.cell(
+                    row=right_ws_row, column=cp.right_col + 1
                 )
-                inserts.append((insert_idx, pair.right_row))
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    left.worksheet, left_ws_row, cp.left_col + 1
+                )
+                cached = ExcelMerger._get_cached(
+                    right, pair.right_row, cp.right_col
+                )
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
-        for insert_idx, src_row in sorted(inserts, key=lambda x: x[0], reverse=True):
+        # 2. 右侧独占列插入左侧（右覆盖：以右侧列结构为准）
+        ExcelMerger._sync_exclusive_columns(
+            diff_result, right, left, src_is_right=True
+        )
+
+        # 3. right_only 行按位置插入（此时左侧每个对齐列都有实际列，
+        #    物理列号 = aligned_idx）
+        inserts: List[Tuple[int, int]] = [
+            (
+                sum(
+                    1
+                    for p in diff_result.aligned_rows[:i]
+                    if p.left_row is not None
+                ),
+                pair.right_row,
+            )
+            for i, pair in enumerate(diff_result.aligned_rows)
+            if pair.status == "right_only"
+        ]
+        col_mapping = [
+            (cp.right_col, idx)
+            for idx, cp in enumerate(aligned_cols)
+            if cp.right_col is not None
+        ]
+        for insert_idx, src_row in sorted(
+            inserts, key=lambda x: x[0], reverse=True
+        ):
             ExcelMerger.insert_row_to_other(
-                right, src_row, left, insert_idx, insert_max_col
+                right, src_row, left, insert_idx, 0, col_mapping
             )
 
     @staticmethod
@@ -103,41 +308,63 @@ class ExcelMerger:
           使用 aligned_cols 映射到实际列号。
         - "left_only" 行：在右侧对应位置插入新行并复制左侧整行（保持对齐位置，
           而非追加到末尾）。多个插入按从后往前执行，避免位置偏移。
+        - "left_only" 列：先插入右侧对应位置（含表头与匹配行数据），再处理
+          行插入，确保两侧列结构不同时不错位、不丢数据。
         """
         aligned_cols = diff_result.aligned_cols
-        insert_max_col = max(left.max_col, right.max_col)
 
-        inserts: List[Tuple[int, int]] = []
-        for i, pair in enumerate(diff_result.aligned_rows):
-            if pair.status == "different":
-                left_ws_row = pair.left_row + 1
-                right_ws_row = pair.right_row + 1
-                for aligned_col in pair.diff_cells:
-                    if aligned_col >= len(aligned_cols):
-                        continue
-                    cp = aligned_cols[aligned_col]
-                    if cp.status != "same":
-                        continue
-                    src_cell = left.worksheet.cell(
-                        row=left_ws_row, column=cp.left_col + 1
-                    )
-                    tgt_cell = right.worksheet.cell(
-                        row=right_ws_row, column=cp.right_col + 1
-                    )
-                    cached = ExcelMerger._get_cached(
-                        left, pair.left_row, cp.left_col
-                    )
-                    ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
-                    ExcelLoader.copy_cell_style(src_cell, tgt_cell)
-            elif pair.status == "left_only":
-                insert_idx = sum(
-                    1 for p in diff_result.aligned_rows[:i] if p.right_row is not None
+        # 1. 覆盖 different 单元格（必须在插列之前，使用原始列索引）
+        for pair in diff_result.aligned_rows:
+            if pair.status != "different":
+                continue
+            left_ws_row = pair.left_row + 1
+            right_ws_row = pair.right_row + 1
+            for aligned_col in pair.diff_cells:
+                if aligned_col >= len(aligned_cols):
+                    continue
+                cp = aligned_cols[aligned_col]
+                if cp.status != "same":
+                    continue
+                src_cell = left.worksheet.cell(
+                    row=left_ws_row, column=cp.left_col + 1
                 )
-                inserts.append((insert_idx, pair.left_row))
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    right.worksheet, right_ws_row, cp.right_col + 1
+                )
+                cached = ExcelMerger._get_cached(
+                    left, pair.left_row, cp.left_col
+                )
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
-        for insert_idx, src_row in sorted(inserts, key=lambda x: x[0], reverse=True):
+        # 2. 左侧独占列插入右侧（左覆盖：以左侧列结构为准）
+        ExcelMerger._sync_exclusive_columns(
+            diff_result, left, right, src_is_right=False
+        )
+
+        # 3. left_only 行按位置插入
+        inserts: List[Tuple[int, int]] = [
+            (
+                sum(
+                    1
+                    for p in diff_result.aligned_rows[:i]
+                    if p.right_row is not None
+                ),
+                pair.left_row,
+            )
+            for i, pair in enumerate(diff_result.aligned_rows)
+            if pair.status == "left_only"
+        ]
+        col_mapping = [
+            (cp.left_col, idx)
+            for idx, cp in enumerate(aligned_cols)
+            if cp.left_col is not None
+        ]
+        for insert_idx, src_row in sorted(
+            inserts, key=lambda x: x[0], reverse=True
+        ):
             ExcelMerger.insert_row_to_other(
-                left, src_row, right, insert_idx, insert_max_col
+                left, src_row, right, insert_idx, 0, col_mapping
             )
 
     @staticmethod
@@ -150,12 +377,25 @@ class ExcelMerger:
         """追加差异行：仅把 status=="right_only" 的行整行追加到左侧末尾。
 
         - 不处理 "different" 行，保持左侧原值不变。
+        - 右侧独占列先同步到左侧（含表头与匹配行数据），追加行不会丢列。
         - key_cols 参数保留以匹配调用方签名，本方法不依赖它。
         """
-        append_max_col = max(left.max_col, right.max_col)
+        aligned_cols = diff_result.aligned_cols
+
+        # 先同步右侧独占列，再按对齐索引追加整行
+        ExcelMerger._sync_exclusive_columns(
+            diff_result, right, left, src_is_right=True
+        )
+        col_mapping = [
+            (cp.right_col, idx)
+            for idx, cp in enumerate(aligned_cols)
+            if cp.right_col is not None
+        ]
         for pair in diff_result.aligned_rows:
             if pair.status == "right_only":
-                ExcelMerger._append_row(right, pair.right_row, left, append_max_col)
+                ExcelMerger._append_row(
+                    right, pair.right_row, left, 0, col_mapping
+                )
 
     @staticmethod
     def copy_row_to_other(
@@ -178,7 +418,9 @@ class ExcelMerger:
         if col_mapping is not None:
             for src_col, tgt_col in col_mapping:
                 src_cell = source.worksheet.cell(row=src_ws_row, column=src_col + 1)
-                tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=tgt_col + 1)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, tgt_ws_row, tgt_col + 1
+                )
                 cached = ExcelMerger._get_cached(source, source_row_idx, src_col)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -186,7 +428,9 @@ class ExcelMerger:
             for col in range(max_col):
                 ws_col = col + 1
                 src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
-                tgt_cell = target.worksheet.cell(row=tgt_ws_row, column=ws_col)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, tgt_ws_row, ws_col
+                )
                 cached = ExcelMerger._get_cached(source, source_row_idx, col)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -214,13 +458,19 @@ class ExcelMerger:
         - 返回插入行号(1-based)。
         """
         insert_ws_row = target_insert_row_idx + 1  # 0-based -> 1-based
+        # openpyxl 不会同步移动合并区域，先按 Excel 语义调整，再插入行
+        ExcelMerger._adjust_merged_ranges_for_row_insert(
+            target.worksheet, insert_ws_row
+        )
         target.worksheet.insert_rows(insert_ws_row)
 
         src_ws_row = source_row_idx + 1
         if col_mapping is not None:
             for src_col, tgt_col in col_mapping:
                 src_cell = source.worksheet.cell(row=src_ws_row, column=src_col + 1)
-                tgt_cell = target.worksheet.cell(row=insert_ws_row, column=tgt_col + 1)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, insert_ws_row, tgt_col + 1
+                )
                 cached = ExcelMerger._get_cached(source, source_row_idx, src_col)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -228,7 +478,9 @@ class ExcelMerger:
             for col in range(max_col):
                 ws_col = col + 1
                 src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
-                tgt_cell = target.worksheet.cell(row=insert_ws_row, column=ws_col)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, insert_ws_row, ws_col
+                )
                 cached = ExcelMerger._get_cached(source, source_row_idx, col)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -262,7 +514,9 @@ class ExcelMerger:
     ) -> None:
         """逐项手动合并：把 source 单个单元格(0-based row, 0-based col)值与样式复制到 target 对应位置。"""
         src_cell = source.worksheet.cell(row=source_row_idx + 1, column=col_idx + 1)
-        tgt_cell = target.worksheet.cell(row=target_row_idx + 1, column=col_idx + 1)
+        tgt_cell = ExcelMerger._ensure_writable_cell(
+            target.worksheet, target_row_idx + 1, col_idx + 1
+        )
         cached = ExcelMerger._get_cached(source, source_row_idx, col_idx)
         ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
         ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -288,7 +542,9 @@ class ExcelMerger:
         if row_mapping is not None:
             for src_row, tgt_row in row_mapping:
                 src_cell = source.worksheet.cell(row=src_row + 1, column=src_ws_col)
-                tgt_cell = target.worksheet.cell(row=tgt_row + 1, column=tgt_ws_col)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, tgt_row + 1, tgt_ws_col
+                )
                 cached = ExcelMerger._get_cached(source, src_row, source_col_idx)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -296,7 +552,9 @@ class ExcelMerger:
             for row in range(max_row):
                 ws_row = row + 1
                 src_cell = source.worksheet.cell(row=ws_row, column=src_ws_col)
-                tgt_cell = target.worksheet.cell(row=ws_row, column=tgt_ws_col)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, ws_row, tgt_ws_col
+                )
                 cached = ExcelMerger._get_cached(source, row, source_col_idx)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -324,13 +582,19 @@ class ExcelMerger:
         - 返回插入列号(1-based)。
         """
         insert_ws_col = target_insert_col_idx + 1  # 0-based -> 1-based
+        # openpyxl 不会同步移动合并区域，先按 Excel 语义调整，再插入列
+        ExcelMerger._adjust_merged_ranges_for_col_insert(
+            target.worksheet, insert_ws_col
+        )
         target.worksheet.insert_cols(insert_ws_col)
 
         src_ws_col = source_col_idx + 1
         if row_mapping is not None:
             for src_row, tgt_row in row_mapping:
                 src_cell = source.worksheet.cell(row=src_row + 1, column=src_ws_col)
-                tgt_cell = target.worksheet.cell(row=tgt_row + 1, column=insert_ws_col)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, tgt_row + 1, insert_ws_col
+                )
                 cached = ExcelMerger._get_cached(source, src_row, source_col_idx)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -338,7 +602,9 @@ class ExcelMerger:
             for row in range(max_row):
                 ws_row = row + 1
                 src_cell = source.worksheet.cell(row=ws_row, column=src_ws_col)
-                tgt_cell = target.worksheet.cell(row=ws_row, column=insert_ws_col)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, ws_row, insert_ws_col
+                )
                 cached = ExcelMerger._get_cached(source, row, source_col_idx)
                 ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
                 ExcelLoader.copy_cell_style(src_cell, tgt_cell)
@@ -368,7 +634,11 @@ class ExcelMerger:
         用于从少的一侧（虚拟空行）右键复制到多的一侧时，删除多出的一侧对应的行，
         使两侧行数一致。多个删除按从后往前执行以避免位置偏移。
         """
-        target.worksheet.delete_rows(target_row_idx + 1)
+        del_row = target_row_idx + 1
+        ExcelMerger._adjust_merged_ranges_for_row_delete(
+            target.worksheet, del_row
+        )
+        target.worksheet.delete_rows(del_row)
 
     @staticmethod
     def delete_column(target: SheetData, target_col_idx: int) -> None:
@@ -377,11 +647,19 @@ class ExcelMerger:
         用于从少的一侧（虚拟空列）右键复制到多的一侧时，删除多出的一侧对应的列，
         使两侧列数一致。多个删除按从后往前执行以避免位置偏移。
         """
-        target.worksheet.delete_cols(target_col_idx + 1)
+        del_col = target_col_idx + 1
+        ExcelMerger._adjust_merged_ranges_for_col_delete(
+            target.worksheet, del_col
+        )
+        target.worksheet.delete_cols(del_col)
 
     @staticmethod
     def _append_row(
-        source: SheetData, source_row_idx: int, target: SheetData, max_col: int
+        source: SheetData,
+        source_row_idx: int,
+        target: SheetData,
+        max_col: int,
+        col_mapping: Optional[List[Tuple[int, int]]] = None,
     ) -> int:
         """内部：把 source 指定行(0-based)追加到 target worksheet 末尾。
 
@@ -394,14 +672,30 @@ class ExcelMerger:
         append_row = target.worksheet.max_row + 1
         src_ws_row = source_row_idx + 1
 
-        # 逐列复制值与样式
-        for col in range(max_col):
-            ws_col = col + 1
-            src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
-            tgt_cell = target.worksheet.cell(row=append_row, column=ws_col)
-            cached = ExcelMerger._get_cached(source, source_row_idx, col)
-            ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
-            ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        # 逐列复制值与样式（提供列映射时按对齐列复制，避免结构不同时错位）
+        if col_mapping is not None:
+            for src_col, tgt_col in col_mapping:
+                src_cell = source.worksheet.cell(
+                    row=src_ws_row, column=src_col + 1
+                )
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, append_row, tgt_col + 1
+                )
+                cached = ExcelMerger._get_cached(
+                    source, source_row_idx, src_col
+                )
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+        else:
+            for col in range(max_col):
+                ws_col = col + 1
+                src_cell = source.worksheet.cell(row=src_ws_row, column=ws_col)
+                tgt_cell = ExcelMerger._ensure_writable_cell(
+                    target.worksheet, append_row, ws_col
+                )
+                cached = ExcelMerger._get_cached(source, source_row_idx, col)
+                ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached)
+                ExcelLoader.copy_cell_style(src_cell, tgt_cell)
 
         # 重建以源行为左上角的合并区域
         for min_r, min_c, max_r, max_c in ExcelMerger._find_merged_ranges_for_row(

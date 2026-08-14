@@ -32,7 +32,7 @@ class DiffBirdsEyeView(QWidget):
     自动随所监听表格的滚动刷新视口指示器。
     """
 
-    FIXED_WIDTH = 18  # 极窄纵列宽度
+    FIXED_WIDTH = 14  # 极窄纵列宽度
     SNAP_THRESHOLD_PX = 8  # 点击吸附到最近差异行的像素阈值
 
     def __init__(self, table: QTableWidget, parent: Optional[QWidget] = None) -> None:

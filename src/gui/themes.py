@@ -17,7 +17,7 @@ LIGHT_QSS = """
 QMainWindow, QWidget {
     background-color: #ffffff;
     color: #222222;
-    font-size: 13px;
+    font-size: 12px;
 }
 
 QTableWidget {
@@ -35,7 +35,7 @@ QTableWidget::item {
 QHeaderView::section {
     background-color: #f0f0f0;
     color: #222222;
-    padding: 4px 6px;
+    padding: 3px 4px;
     border: none;
     border-right: 1px solid #d0d0d0;
     border-bottom: 1px solid #d0d0d0;
@@ -48,7 +48,7 @@ QMenuBar {
     border-bottom: 1px solid #d0d0d0;
 }
 QMenuBar::item {
-    padding: 4px 10px;
+    padding: 3px 8px;
     background: transparent;
 }
 QMenuBar::item:selected {
@@ -67,13 +67,27 @@ QToolBar {
     background-color: #f0f0f0;
     border: none;
     border-bottom: 1px solid #d0d0d0;
-    spacing: 2px;
-    padding: 2px;
+    spacing: 1px;
+    padding: 1px;
 }
 QToolBar::separator {
     width: 1px;
     background-color: #d0d0d0;
-    margin: 4px 4px;
+    margin: 2px 3px;
+}
+QToolButton {
+    background: transparent;
+    border: none;
+    border-radius: 2px;
+    padding: 1px 4px;
+    margin: 0px;
+    font-size: 11px;
+}
+QToolButton:hover {
+    background-color: #e8e8e8;
+}
+QToolButton:pressed {
+    background-color: #d8d8d8;
 }
 
 QStatusBar {
@@ -90,16 +104,16 @@ QFrame#BottomBar {
 }
 QFrame#BottomBar QLabel {
     color: #333333;
-    font-size: 12px;
+    font-size: 11px;
 }
 QFrame#BottomBar QPushButton {
     background-color: #e4e4e4;
     color: #222222;
     border: 1px solid #c0c0c0;
     border-radius: 3px;
-    padding: 1px 8px;
-    font-size: 12px;
-    min-height: 16px;
+    padding: 1px 6px;
+    font-size: 11px;
+    min-height: 15px;
 }
 QFrame#BottomBar QPushButton:hover {
     background-color: #d8d8d8;
@@ -121,8 +135,8 @@ QComboBox {
     color: #222222;
     border: 1px solid #c0c0c0;
     border-radius: 2px;
-    padding: 2px 6px;
-    min-height: 18px;
+    padding: 2px 4px;
+    min-height: 16px;
 }
 QComboBox:hover { border-color: #909090; }
 QComboBox::drop-down { border: none; width: 18px; }
@@ -140,8 +154,8 @@ QPushButton {
     color: #222222;
     border: 1px solid #c0c0c0;
     border-radius: 3px;
-    padding: 4px 12px;
-    min-height: 18px;
+    padding: 3px 8px;
+    min-height: 16px;
 }
 QPushButton:hover { background-color: #e8e8e8; }
 QPushButton:pressed { background-color: #d8d8d8; }
@@ -162,7 +176,7 @@ DARK_QSS = """
 QMainWindow, QWidget {
     background-color: #1e1e1e;
     color: #d4d4d4;
-    font-size: 13px;
+    font-size: 12px;
 }
 
 QTableWidget {
@@ -180,7 +194,7 @@ QTableWidget::item {
 QHeaderView::section {
     background-color: #2d2d2d;
     color: #d4d4d4;
-    padding: 4px 6px;
+    padding: 3px 4px;
     border: none;
     border-right: 1px solid #3a3a3a;
     border-bottom: 1px solid #3a3a3a;
@@ -193,7 +207,7 @@ QMenuBar {
     border-bottom: 1px solid #3a3a3a;
 }
 QMenuBar::item {
-    padding: 4px 10px;
+    padding: 3px 8px;
     background: transparent;
 }
 QMenuBar::item:selected {
@@ -212,13 +226,27 @@ QToolBar {
     background-color: #2d2d2d;
     border: none;
     border-bottom: 1px solid #3a3a3a;
-    spacing: 2px;
-    padding: 2px;
+    spacing: 1px;
+    padding: 1px;
 }
 QToolBar::separator {
     width: 1px;
     background-color: #3a3a3a;
-    margin: 4px 4px;
+    margin: 2px 3px;
+}
+QToolButton {
+    background: transparent;
+    border: none;
+    border-radius: 2px;
+    padding: 1px 4px;
+    margin: 0px;
+    font-size: 11px;
+}
+QToolButton:hover {
+    background-color: #454545;
+}
+QToolButton:pressed {
+    background-color: #2d2d2d;
 }
 
 QStatusBar {
@@ -235,16 +263,16 @@ QFrame#BottomBar {
 }
 QFrame#BottomBar QLabel {
     color: #c0c0c0;
-    font-size: 12px;
+    font-size: 11px;
 }
 QFrame#BottomBar QPushButton {
     background-color: #3a3a3a;
     color: #d4d4d4;
     border: 1px solid #4a4a4a;
     border-radius: 3px;
-    padding: 1px 8px;
-    font-size: 12px;
-    min-height: 16px;
+    padding: 1px 6px;
+    font-size: 11px;
+    min-height: 15px;
 }
 QFrame#BottomBar QPushButton:hover {
     background-color: #454545;
@@ -266,8 +294,8 @@ QComboBox {
     color: #d4d4d4;
     border: 1px solid #4a4a4a;
     border-radius: 2px;
-    padding: 2px 6px;
-    min-height: 18px;
+    padding: 2px 4px;
+    min-height: 16px;
 }
 QComboBox:hover { border-color: #6a6a6a; }
 QComboBox::drop-down { border: none; width: 18px; }
@@ -285,8 +313,8 @@ QPushButton {
     color: #d4d4d4;
     border: 1px solid #4a4a4a;
     border-radius: 3px;
-    padding: 4px 12px;
-    min-height: 18px;
+    padding: 3px 8px;
+    min-height: 16px;
 }
 QPushButton:hover { background-color: #454545; }
 QPushButton:pressed { background-color: #2d2d2d; }

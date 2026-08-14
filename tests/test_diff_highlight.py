@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem
 
 from src.core.chardiff import char_diff_ranges
 from src.gui.diff_highlight_delegate import (
+    CELL_WRAP_ROLE,
     HIGHLIGHT_RANGES_ROLE,
     DiffHighlightDelegate,
 )
@@ -107,9 +108,9 @@ class DiffHighlightDelegateTest(unittest.TestCase):
         window.right_table.cellDoubleClicked.emit(0, 0)
         self.app.processEvents()
 
+        # 内容在窗口宽度 80% 内：只加宽列，不折行，左右同步
         self.assertGreater(window.right_table.columnWidth(0), initial_w)
-        self.assertGreater(window.right_table.rowHeight(0), initial_h)
-        # 左右表格保持同步
+        self.assertIsNone(window.right_table.item(0, 0).data(CELL_WRAP_ROLE))
         self.assertEqual(
             window.left_table.columnWidth(0),
             window.right_table.columnWidth(0),
@@ -118,6 +119,42 @@ class DiffHighlightDelegateTest(unittest.TestCase):
             window.left_table.rowHeight(0),
             window.right_table.rowHeight(0),
         )
+
+        # 再次双击恢复初始列宽/行高
+        window.right_table.cellDoubleClicked.emit(0, 0)
+        self.app.processEvents()
+        self.assertEqual(window.right_table.columnWidth(0), initial_w)
+        self.assertEqual(window.right_table.rowHeight(0), initial_h)
+        window.close()
+
+    def test_double_click_wraps_when_exceeding_window_width(self):
+        if self.app is None:
+            self.skipTest("无可用 Qt 平台插件，跳过 GUI 冒烟测试")
+
+        window = MainWindow()
+        text = "很长的内容" * 200
+        for table in (window.left_table, window.right_table):
+            table.setColumnCount(2)
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem(text))
+
+        initial_w = window.right_table.columnWidth(0)
+        initial_h = window.right_table.rowHeight(0)
+        window.right_table.cellDoubleClicked.emit(0, 0)
+        self.app.processEvents()
+
+        # 超过窗口宽度 80%：列宽被限制到 80%，并启用折行
+        self.assertEqual(
+            window.right_table.columnWidth(0), int(window.width() * 0.8)
+        )
+        self.assertTrue(window.right_table.item(0, 0).data(CELL_WRAP_ROLE))
+        self.assertGreater(window.right_table.rowHeight(0), initial_h)
+
+        # 再次双击恢复
+        window.right_table.cellDoubleClicked.emit(0, 0)
+        self.app.processEvents()
+        self.assertEqual(window.right_table.columnWidth(0), initial_w)
+        self.assertEqual(window.right_table.rowHeight(0), initial_h)
         window.close()
 
     def test_diff_cell_has_light_background_and_char_ranges(self):

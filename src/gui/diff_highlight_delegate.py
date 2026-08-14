@@ -10,7 +10,7 @@ from __future__ import annotations
 from html import escape as html_escape
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QTextDocument
+from PySide6.QtGui import QBrush, QColor, QTextDocument, QTextOption
 from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
@@ -22,6 +22,8 @@ from src.gui.themes import is_dark_mode
 
 # 单元格携带的字符级高亮区间数据角色
 HIGHLIGHT_RANGES_ROLE = Qt.ItemDataRole.UserRole + 1
+# 单元格是否启用自动折行显示
+CELL_WRAP_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
 def _escape_segment(text: str) -> str:
@@ -32,12 +34,17 @@ def _escape_segment(text: str) -> str:
     return escaped.replace(" ", "&nbsp;")
 
 
+# 供主窗口测量折行高度时复用，确保与 delegate 实际渲染完全一致
+escape_segment = _escape_segment
+
+
 class DiffHighlightDelegate(QStyledItemDelegate):
     """按字符区间渲染部分高亮文本的表格 delegate。"""
 
     def paint(self, painter, option, index) -> None:  # noqa: N802
         ranges = index.data(HIGHLIGHT_RANGES_ROLE)
-        if not ranges:
+        wrap = bool(index.data(CELL_WRAP_ROLE))
+        if not ranges and not wrap:
             super().paint(painter, option, index)
             return
 
@@ -71,27 +78,33 @@ class DiffHighlightDelegate(QStyledItemDelegate):
         # 按原文本索引切分，逐段转义，避免转义后长度变化导致错位
         parts = []
         pos = 0
-        for start, end in sorted(ranges):
-            start = max(start, 0)
-            end = min(end, len(text))
-            if end <= start:
-                continue
-            parts.append(_escape_segment(text[pos:start]))
-            parts.append(
-                '<span style="background-color:{};color:{};">{}</span>'.format(
-                    highlight_bg.name(),
-                    text_color.name(),
-                    _escape_segment(text[start:end]),
+        if ranges:
+            for start, end in sorted(ranges):
+                start = max(start, 0)
+                end = min(end, len(text))
+                if end <= start:
+                    continue
+                parts.append(_escape_segment(text[pos:start]))
+                parts.append(
+                    '<span style="background-color:{};color:{};">{}</span>'.format(
+                        highlight_bg.name(),
+                        text_color.name(),
+                        _escape_segment(text[start:end]),
+                    )
                 )
-            )
-            pos = end
+                pos = end
         parts.append(_escape_segment(text[pos:]))
 
         doc = QTextDocument()
         doc.setDefaultFont(opt.font)
         doc.setDocumentMargin(0)
+        wrap_option = QTextOption()
+        wrap_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        doc.setDefaultTextOption(wrap_option)
         doc.setHtml("".join(parts))
-        doc.setTextWidth(max(0, opt.rect.width() - 4))
+        if wrap:
+            # 按当前列宽折行，超长内容不再需要把列宽拉到极大值
+            doc.setTextWidth(max(0, opt.rect.width() - 4))
 
         painter.translate(opt.rect.left() + 2, opt.rect.top())
         doc.drawContents(painter)

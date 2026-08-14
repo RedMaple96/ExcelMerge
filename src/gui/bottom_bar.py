@@ -70,7 +70,7 @@ class SheetTab(QPushButton):
         self.setCheckable(True)
         self.setText(name)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(24)
+        self.setFixedHeight(22)
         # 固定图标区域宽度，避免有无红点时文本跳动
         self.setIconSize(QPixmap(_ICON_SIZE, _ICON_SIZE).size())
 
@@ -136,7 +136,7 @@ class BottomBar(QFrame):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("BottomBar")
-        self.setFixedHeight(30)
+        self.setFixedHeight(26)
 
         self._tabs: dict = {}          # name -> SheetTab
         self._order: List[str] = []    # 标签显示顺序
@@ -148,7 +148,7 @@ class BottomBar(QFrame):
 
         # ---- 左侧：坐标 ----
         self.coord_label = QLabel("单元格: -")
-        self.coord_label.setMinimumWidth(90)
+        self.coord_label.setMinimumWidth(80)
         layout.addWidget(self.coord_label)
 
         # ---- 分隔线 ----
@@ -159,7 +159,7 @@ class BottomBar(QFrame):
 
         # ---- 左箭头按钮 ----
         self.btn_prev = QPushButton("◀")
-        self.btn_prev.setFixedSize(22, 22)
+        self.btn_prev.setFixedSize(20, 20)
         self.btn_prev.setCursor(Qt.PointingHandCursor)
         self.btn_prev.setToolTip("向左滚动（右键列出全部标签）")
         self.btn_prev.clicked.connect(self._scroll_left)
@@ -178,7 +178,7 @@ class BottomBar(QFrame):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setFrameShape(QFrame.NoFrame)
-        self._scroll.setFixedHeight(26)
+        self._scroll.setFixedHeight(24)
 
         self._tabs_container = QWidget()
         self._tabs_container.setObjectName("TabsContainer")
@@ -197,7 +197,7 @@ class BottomBar(QFrame):
 
         # ---- 右箭头按钮 ----
         self.btn_next = QPushButton("▶")
-        self.btn_next.setFixedSize(22, 22)
+        self.btn_next.setFixedSize(20, 20)
         self.btn_next.setCursor(Qt.PointingHandCursor)
         self.btn_next.setToolTip("向右滚动（右键列出全部标签）")
         self.btn_next.clicked.connect(self._scroll_right)

@@ -14,7 +14,7 @@ import shutil
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QShortcut,
     QTextDocument,
+    QTextOption,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -58,8 +59,10 @@ from src.gui.column_settings_dialog import ColumnSettingsDialog
 from src.gui.diff_birds_eye import DiffBirdsEyeView
 from src.gui.diff_col_birds_eye import DiffColBirdsEyeView
 from src.gui.diff_highlight_delegate import (
+    CELL_WRAP_ROLE,
     HIGHLIGHT_RANGES_ROLE,
     DiffHighlightDelegate,
+    escape_segment,
 )
 from src.gui.themes import is_dark_mode
 from src.gui.workers import CompareWorker, SheetDiffSummaryWorker
@@ -74,7 +77,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ExcelMerge — 无标题")
-        self.resize(1200, 750)
+        self.resize(1600, 950)
 
         # ---- 共享状态 ----
         self.left_path: Optional[str] = None
@@ -104,6 +107,8 @@ class MainWindow(QMainWindow):
         self._ctx_aligned_idx: int = -1  # 对齐行索引（aligned_rows 下标）
         self._ctx_row: int = -1  # 视觉行
         self._ctx_col: int = -1  # 视觉列
+        # 双击自适应状态：(row, col) -> 展开前尺寸，用于再次双击恢复
+        self._fit_cells: dict = {}
 
         # ---- 底部导航栏相关状态 ----
         self._sheet_diff_summary: dict = {}  # sheet_name -> has_diff (bool)
@@ -127,13 +132,13 @@ class MainWindow(QMainWindow):
         central.setAcceptDrops(True)  # 启用窗口级拖拽接收
 
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(4, 4, 4, 0)
+        outer.setContentsMargins(2, 2, 2, 0)
         outer.setSpacing(0)
 
         # ---- 上方：左右双面板 ----
         panels = QHBoxLayout()
         panels.setContentsMargins(0, 0, 0, 0)
-        panels.setSpacing(4)
+        panels.setSpacing(2)
 
         # 左侧面板
         (
@@ -170,15 +175,15 @@ class MainWindow(QMainWindow):
         """创建单个面板，返回 (file_label, sheet_combo, table)。"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(2)
 
         # 标题区：文件信息 + Sheet 下拉
         header = QFrame()
         header.setFrameShape(QFrame.StyledPanel)
         header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(6, 4, 6, 4)
-        header_layout.setSpacing(2)
+        header_layout.setContentsMargins(3, 2, 3, 2)
+        header_layout.setSpacing(1)
 
         file_label = QLabel("未加载")
         file_label.setStyleSheet("font-weight: 600;")
@@ -207,6 +212,13 @@ class MainWindow(QMainWindow):
         # 行号：使用 verticalHeader，可由 show_row_numbers 切换显隐
         table.verticalHeader().setVisible(self.show_row_numbers)
         table.verticalHeader().setDefaultAlignment(Qt.AlignCenter)
+        # 紧凑行高：单行文字高度 + 少量上下留白，避免默认行距过高
+        doc = QTextDocument()
+        doc.setDefaultFont(table.font())
+        doc.setDocumentMargin(0)
+        doc.setPlainText("A")
+        compact_row_height = int(math.ceil(doc.size().height())) + 4
+        table.verticalHeader().setDefaultSectionSize(compact_row_height)
         hheader = table.horizontalHeader()
         hheader.setStretchLastSection(True)
         table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
@@ -332,7 +344,8 @@ class MainWindow(QMainWindow):
         """构建水平工具栏：打开左/打开右/保存/交换/上一个差异/下一个差异/统计/列设置/合并。"""
         self.toolbar = QToolBar("主工具栏", self)
         self.toolbar.setMovable(False)
-        self.toolbar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(self.toolbar)
 
         style = self.style()
@@ -920,6 +933,8 @@ class MainWindow(QMainWindow):
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         try:
+            # 表格重建后，之前的双击自适应状态随之失效
+            self._fit_cells.clear()
             table.setRowCount(0)
             n_cols = len(aligned_cols)
             table.setColumnCount(n_cols)
@@ -2371,7 +2386,7 @@ class MainWindow(QMainWindow):
         self.filter_combo.blockSignals(False)
 
     def _on_cell_double_clicked(self, row: int, col: int) -> None:
-        """双击单元格：内容未完整显示时，自动调整该列宽与该行高。
+        """双击单元格：按左右两侧内容综合调整该列宽与该行高。
 
         左右两个表格使用同一对齐行列结构，调整会同步应用到两侧，
         保证并排视图继续对齐。
@@ -2381,38 +2396,116 @@ class MainWindow(QMainWindow):
             return
         if row < 0 or col < 0:
             return
-        item = table.item(row, col)
-        if item is None or not item.text():
+        left_item = self.left_table.item(row, col)
+        right_item = self.right_table.item(row, col)
+        left_text = left_item.text() if left_item is not None else ""
+        right_text = right_item.text() if right_item is not None else ""
+        if not left_text and not right_text:
             return
-        self._autofit_cell(row, col, item.text())
+        self._autofit_cell(row, col, left_text, right_text)
 
-    def _autofit_cell(self, row: int, col: int, text: str) -> None:
-        """把指定单元格所在的列宽与行高调整到足够完整显示其文本。"""
-        doc = QTextDocument()
-        doc.setDefaultFont(self.left_table.font())
-        doc.setDocumentMargin(0)
-        doc.setPlainText(text)
-        # 以不换行的理想宽度测量完整单行宽度，再据此得到多行总高度
-        ideal_w = doc.idealWidth()
-        doc.setTextWidth(ideal_w)
-        size = doc.size()
-        needed_w = int(math.ceil(ideal_w)) + 10  # 左右留白与网格线
-        needed_h = int(math.ceil(size.height())) + 4  # 上下留白
+    def _autofit_cell(
+        self, row: int, col: int, left_text: str, right_text: str
+    ) -> None:
+        """双击自适应：优先加宽列，列宽上限为窗口宽度的 80%，再折行。
 
-        truncated = any(
-            table.columnWidth(col) < needed_w
-            or table.rowHeight(row) < needed_h
+        再次双击同一单元格时，恢复首次双击前的列宽与行高。
+        """
+        state = self._fit_cells.get((row, col))
+        if state is not None:
+            # 再次双击：恢复展开前的尺寸与折行状态
+            for side, table in (("left", self.left_table), ("right", self.right_table)):
+                table.setColumnWidth(col, state[f"{side}_w"])
+                table.setRowHeight(row, state[f"{side}_h"])
+                item = table.item(row, col)
+                if item is not None:
+                    item.setData(CELL_WRAP_ROLE, None)
+            self._fit_cells.pop((row, col), None)
+            coord = f"{get_column_letter(col + 1)}{row + 1}"
+            self.update_status(f"已恢复 {coord} 显示")
+            return
+
+        # 记录展开前两侧尺寸，便于恢复
+        original = {
+            "left_w": self.left_table.columnWidth(col),
+            "right_w": self.right_table.columnWidth(col),
+            "left_h": self.left_table.rowHeight(row),
+            "right_h": self.right_table.rowHeight(row),
+        }
+
+        def _make_doc(text: str, font):
+            doc = QTextDocument()
+            doc.setDefaultFont(font)
+            doc.setDocumentMargin(0)
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            doc.setDefaultTextOption(option)
+            doc.setHtml(escape_segment(text))
+            return doc
+
+        left_doc = _make_doc(left_text, self.left_table.font()) if left_text else None
+        right_doc = (
+            _make_doc(right_text, self.right_table.font())
+            if right_text
+            else None
+        )
+        ideal_w = 0
+        no_wrap_h = 0
+        for doc in (left_doc, right_doc):
+            if doc is None:
+                continue
+            ideal_w = max(ideal_w, doc.idealWidth())
+            doc.setTextWidth(doc.idealWidth())
+            no_wrap_h = max(
+                no_wrap_h, int(math.ceil(doc.size().height())) + 4
+            )
+
+        # 已完整显示则无需调整（不进入展开状态，也就不需要恢复）
+        fits = all(
+            table.columnWidth(col) >= ideal_w + 10
+            and table.rowHeight(row) >= no_wrap_h
             for table in (self.left_table, self.right_table)
         )
-        if not truncated:
+        if fits:
             self.update_status("内容已完整显示，无需调整")
             return
 
-        for table in (self.left_table, self.right_table):
-            table.setColumnWidth(col, max(table.columnWidth(col), needed_w))
-            table.setRowHeight(row, max(table.rowHeight(row), needed_h))
-        coord = f"{get_column_letter(col + 1)}{row + 1}"
-        self.update_status(f"已调整 {coord} 的列宽与行高，完整显示内容")
+        max_col_w = int(self.width() * 0.8)
+        if ideal_w + 10 <= max_col_w:
+            # 只加宽列即可完整显示，无需折行
+            for table in (self.left_table, self.right_table):
+                table.setColumnWidth(col, ideal_w + 10)
+                table.setRowHeight(row, max(table.rowHeight(row), no_wrap_h))
+                item = table.item(row, col)
+                if item is not None:
+                    item.setData(CELL_WRAP_ROLE, None)
+            coord = f"{get_column_letter(col + 1)}{row + 1}"
+            self.update_status(f"已加宽 {coord} 列显示完整内容")
+        else:
+            # 拉到窗口宽度的 80% 后仍放不下，启用折行
+            wrap_heights = []
+            for table, text, doc in (
+                (self.left_table, left_text, left_doc),
+                (self.right_table, right_text, right_doc),
+            ):
+                table.setColumnWidth(col, max_col_w)
+                actual_w = table.columnWidth(col)
+                item = table.item(row, col)
+                if item is not None and text:
+                    item.setData(CELL_WRAP_ROLE, True)
+                if doc is None:
+                    continue
+                doc.setTextWidth(max(1, actual_w - 4))
+                wrap_heights.append(
+                    int(math.ceil(doc.size().height())) + 4
+                )
+            needed_h = max(wrap_heights) if wrap_heights else no_wrap_h
+            for table in (self.left_table, self.right_table):
+                table.setRowHeight(row, max(table.rowHeight(row), needed_h))
+            coord = f"{get_column_letter(col + 1)}{row + 1}"
+            self.update_status(f"已折行显示 {coord} 内容")
+
+        self._fit_cells[(row, col)] = original
 
     # ------------------------------------------------------------------ #
     # 帮助

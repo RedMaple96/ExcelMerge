@@ -30,7 +30,7 @@ class DiffColBirdsEyeView(QWidget):
     自动随所监听表格的水平滚动刷新视口指示器。
     """
 
-    FIXED_HEIGHT = 18  # 极窄横条高度
+    FIXED_HEIGHT = 14  # 极窄横条高度
     SNAP_THRESHOLD_PX = 8  # 点击吸附到最近差异列的像素阈值
 
     def __init__(self, table: QTableWidget, parent: Optional[QWidget] = None) -> None:

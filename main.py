@@ -114,7 +114,7 @@ def main() -> int:
 
     # 默认字体：macOS 使用 SF Pro，其它平台交由 Qt 决定（Task 11.3）
     if sys.platform == "darwin":
-        app.setFont(QFont("SF Pro", 13))
+        app.setFont(QFont("SF Pro", 12))
 
     # 应用浅色/深色主题（Task 6.4 / Task 11.2）
     apply_theme(app)

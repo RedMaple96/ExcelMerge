@@ -120,6 +120,29 @@ class DiffHighlightDelegateTest(unittest.TestCase):
         )
         window.close()
 
+    def test_diff_cell_has_light_background_and_char_ranges(self):
+        if self.app is None:
+            self.skipTest("无可用 Qt 平台插件，跳过 GUI 冒烟测试")
+
+        window = MainWindow()
+        for table in (window.left_table, window.right_table):
+            table.setColumnCount(2)
+            table.setRowCount(1)
+        window.left_table.setItem(0, 0, QTableWidgetItem("12345"))
+        window.right_table.setItem(0, 0, QTableWidgetItem("12678"))
+
+        window._apply_char_highlight(0, 0)
+
+        left_item = window.left_table.item(0, 0)
+        right_item = window.right_table.item(0, 0)
+        # 整格浅色背景，保证内容被截断时也能看出差异
+        self.assertEqual(left_item.background().color().name().lower(), "#ffe0e0")
+        self.assertEqual(right_item.background().color().name().lower(), "#ffe0e0")
+        # 字符级高亮区间仍然保留
+        self.assertEqual(left_item.data(HIGHLIGHT_RANGES_ROLE), [(2, 5)])
+        self.assertEqual(right_item.data(HIGHLIGHT_RANGES_ROLE), [(2, 5)])
+        window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

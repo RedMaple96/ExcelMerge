@@ -1102,6 +1102,7 @@ class MainWindow(QMainWindow):
 
         配色方案（参考 Beyond Compare）：
         - diff_cell: 差异单元格的深红底色（单元格级标识）
+        - diff_cell_bg: 差异单元格的浅色整格背景（内容截断时也能看出差异）
         - left_only_row: 仅左侧有的行的蓝色底色（左侧独占）
         - left_only_gap: 仅左侧有的行对应的右侧虚拟空行底色（浅蓝灰）
         - right_only_row: 仅右侧有的行的绿色底色（右侧独占）
@@ -1114,6 +1115,7 @@ class MainWindow(QMainWindow):
         if dark:
             return {
                 "diff_cell": QColor("#B22222"),
+                "diff_cell_bg": QColor("#4A2A2A"),
                 "left_only_row": QColor("#1A2A4A"),
                 "left_only_gap": QColor("#1E2A38"),
                 "right_only_row": QColor("#1A3A2A"),
@@ -1124,6 +1126,7 @@ class MainWindow(QMainWindow):
             }
         return {
             "diff_cell": QColor("#FF6B6B"),
+            "diff_cell_bg": QColor("#FFE0E0"),
             "left_only_row": QColor("#D6E4FF"),
             "left_only_gap": QColor("#EEF3FB"),
             "right_only_row": QColor("#D4F0E0"),
@@ -1231,6 +1234,11 @@ class MainWindow(QMainWindow):
         right_text = right_item.text()
         left_ranges, right_ranges = char_diff_ranges(left_text, right_text)
         if left_ranges or right_ranges:
+            # 整格先铺一层浅色背景：即使差异片段被列宽/行高截断，
+            # 用户也能一眼看出该单元格有差异；差异片段再用深色叠加。
+            cell_bg = self._diff_colors()["diff_cell_bg"]
+            left_item.setBackground(QBrush(cell_bg))
+            right_item.setBackground(QBrush(cell_bg))
             left_item.setData(HIGHLIGHT_RANGES_ROLE, left_ranges or None)
             right_item.setData(HIGHLIGHT_RANGES_ROLE, right_ranges or None)
         else:

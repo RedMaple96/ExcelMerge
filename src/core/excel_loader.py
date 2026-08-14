@@ -101,32 +101,42 @@ class ExcelLoader:
         return ranges
 
     @staticmethod
+    def _iter_cells(ws: Worksheet):
+        """按 (row, col, cell) 遍历实际存在的单元格。
+
+        优先使用 openpyxl 内部的 ``_cells`` 字典（只访问有值的单元格，速度快）；
+        若未来版本移除该私有属性，则回退到 ``iter_rows``，保证跨版本稳定。
+        """
+        cells = getattr(ws, "_cells", None)
+        if cells is not None:
+            for (row, col), cell in cells.items():
+                yield row, col, cell
+        else:
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        yield cell.row, cell.column, cell
+
+    @staticmethod
     def _build_value_grid(
         ws: Worksheet,
     ) -> Tuple[int, int, List[List[str]]]:
-        """单次遍历 ws._cells，同时计算实际数据边界并构建字符串值二维表。
+        """两次遍历单元格，分别计算边界与填充二维表。
 
-        相比 _find_actual_bounds + 逐格 ws.cell(r,c) 的双重遍历，直接遍历
-        _cells 字典只访问实际存在的单元格，避免为空单元格创建 Cell 对象
-        的开销，显著提升大表加载速度。
-
-        边界判定与 _find_actual_bounds 一致：仅非空（strip 后）单元格计入
-        边界，但所有非 None 值单元格（含纯空白）在边界内保留原值。
-        合并单元格区域同样计入边界：合并区域本身是表结构的一部分，即使
-        其左上角为空或区域内只有部分格子有值，也不能被裁剪，否则会造成
-        行列错位（如 A2:C3 合并时 C 列被误判为不存在）。
+        相比原先"先存 cell_map 字典、再填充 grid"的实现，这里不保留
+        ``(row, col) -> str`` 的中间字典，显著降低大表加载时的峰值内存。
+        边界判定与填充结果保持不变：仅非空（strip 后）单元格计入边界，
+        合并区域计入边界，所有非 None 值单元格在边界内保留原值。
 
         返回 (max_row, max_col, values)；全空且无合并区域时返回 (0, 0, [])。
         """
-        cell_map: Dict[Tuple[int, int], str] = {}
         actual_max_row = 0
         actual_max_col = 0
-        for (row, col), cell in ws._cells.items():
+        for row, col, cell in ExcelLoader._iter_cells(ws):
             val = cell.value
             if val is None:
                 continue
             s = ExcelLoader._stringify(val)
-            cell_map[(row, col)] = s
             if s.strip() != "":
                 if row > actual_max_row:
                     actual_max_row = row
@@ -143,10 +153,26 @@ class ExcelLoader:
         values: List[List[str]] = [
             ["" for _ in range(actual_max_col)] for _ in range(actual_max_row)
         ]
-        for (row, col), s in cell_map.items():
+        for row, col, cell in ExcelLoader._iter_cells(ws):
+            val = cell.value
+            if val is None:
+                continue
             if 1 <= row <= actual_max_row and 1 <= col <= actual_max_col:
-                values[row - 1][col - 1] = s
+                values[row - 1][col - 1] = ExcelLoader._stringify(val)
         return actual_max_row, actual_max_col, values
+
+    @staticmethod
+    def has_formula_cells(wb: Workbook) -> bool:
+        """判断工作簿中是否存在公式单元格。
+
+        用于决定是否需要额外加载 data_only=True 的缓存值副本：没有公式时
+        跳过第二次文件解析，可比对性能有显著收益，且行为完全一致。
+        """
+        for ws in wb.worksheets:
+            for _row, _col, cell in ExcelLoader._iter_cells(ws):
+                if ExcelLoader._is_formula_cell(cell):
+                    return True
+        return False
 
     @staticmethod
     def extract_sheet_data(
@@ -259,7 +285,11 @@ class ExcelLoader:
         text = getattr(value, "text", None)
         if text is not None:
             return str(text)
-        return str(value)
+        try:
+            return str(value)
+        except Exception:
+            # 未知/异常类型兜底，避免单个单元格导致整个加载流程崩溃
+            return ""
 
     @staticmethod
     def copy_cell_value(

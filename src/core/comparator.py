@@ -329,6 +329,9 @@ class ExcelComparator:
             if score > best_score:
                 best_score = score
                 best_row = r
+                # 已是理论最高分，后续行不可能更优，提前退出
+                if score == n_cols:
+                    return best_row
         return best_row
 
     @staticmethod

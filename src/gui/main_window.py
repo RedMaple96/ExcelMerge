@@ -557,10 +557,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "加载失败", f"无法加载文件:\n{path}\n\n{exc}")
             return
 
-        # 加载 data_only=True 副本以获取公式缓存计算值（data_only 副本加载失败不致命，
-        # 比较器会退化为仅比较公式）
+        # 仅当工作簿含公式时才加载 data_only=True 副本；无公式文件跳过
+        # 第二次文件解析，加载更快且比较行为不变（缓存副本加载失败不致命）
+        wb_cached = None
         try:
-            wb_cached = ExcelLoader.load_workbook_cached(path)
+            if ExcelLoader.has_formula_cells(wb):
+                wb_cached = ExcelLoader.load_workbook_cached(path)
         except Exception:  # noqa: BLE001
             wb_cached = None
 
@@ -739,8 +741,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "重载失败", f"重新加载文件失败:\n{path}\n\n{exc}")
             return
+        wb_cached = None
         try:
-            wb_cached = ExcelLoader.load_workbook_cached(path)
+            if ExcelLoader.has_formula_cells(wb):
+                wb_cached = ExcelLoader.load_workbook_cached(path)
         except Exception:  # noqa: BLE001
             wb_cached = None
 

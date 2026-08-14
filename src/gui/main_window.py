@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 from openpyxl.utils import get_column_letter
 
+from src import __version__ as APP_VERSION
 from src.core.chardiff import char_diff_ranges
 from src.core.comparator import ColPair, DiffResult, ExcelComparator
 from src.core.excel_loader import ExcelLoader, SheetData
@@ -2407,7 +2408,7 @@ class MainWindow(QMainWindow):
     def about(self) -> None:
         QMessageBox.about(
             self, "关于",
-            "ExcelMerge\n\n"
+            f"ExcelMerge v{APP_VERSION}\n\n"
             "支持差异可视化、多策略合并、合并单元格与公式保留。\n\n"
             "文件格式：仅支持 Microsoft Excel 2007+ 的 .xlsx 格式。\n"
             "旧版 .xls 文件请先在 Excel 中另存为 .xlsx。",

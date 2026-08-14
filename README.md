@@ -250,6 +250,15 @@ The maintainer information is listed below:
 Project history is maintained in [CHANGELOG.md](./CHANGELOG.md).
 At the moment, the repository does not have published Git tags or GitHub Releases yet, so the changelog acts as the current source of truth for documented changes.
 
+### `v1.0.2` - `2026-08-14`
+
+- Fix column/row misalignment, including merged cells, column reordering, and automatic header-row selection.
+- Fix merged-cell corruption when inserting/deleting rows or columns, and keep columns in sync during merges.
+- Add character-level highlighting inside differing cells.
+- Fix missing sheet-tab red dots when only columns are added or removed.
+- Add double-click to auto-fit a truncated cell's column width and row height.
+- Add unsaved-change confirmation on quit or file replacement.
+
 ### `v0.1.0` - `2026-06-30`
 
 - Initialize the project documentation.

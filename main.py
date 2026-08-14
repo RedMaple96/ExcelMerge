@@ -14,6 +14,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QDialog
 
+from src import __version__ as APP_VERSION
 from src.gui.license_dialog import LicenseDialog
 from src.gui.main_window import MainWindow
 from src.gui.themes import apply_theme
@@ -109,6 +110,7 @@ def main() -> int:
     app.setApplicationName("ExcelMerge")
     app.setApplicationDisplayName("ExcelMerge")
     app.setOrganizationName("ExcelMerge")
+    app.setApplicationVersion(APP_VERSION)
 
     # 默认字体：macOS 使用 SF Pro，其它平台交由 Qt 决定（Task 11.3）
     if sys.platform == "darwin":

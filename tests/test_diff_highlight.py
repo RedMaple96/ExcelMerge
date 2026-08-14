@@ -19,6 +19,7 @@ from src.gui.diff_highlight_delegate import (
     HIGHLIGHT_RANGES_ROLE,
     DiffHighlightDelegate,
 )
+from src.gui.main_window import MainWindow
 
 
 def _make_app():
@@ -88,6 +89,36 @@ class DiffHighlightDelegateTest(unittest.TestCase):
         pixmap = QPixmap(300, 200)
         pixmap.fill()
         table.viewport().render(pixmap)
+
+    def test_double_click_autofits_cell(self):
+        if self.app is None:
+            self.skipTest("无可用 Qt 平台插件，跳过 GUI 冒烟测试")
+
+        window = MainWindow()
+        text = "第一行内容\n第二行是明显更长的内容内容内容内容内容"
+        for table in (window.left_table, window.right_table):
+            # 用两列：目标放第 0 列，避免末列被 stretchLastSection 拉宽
+            table.setColumnCount(2)
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem(text))
+
+        initial_w = window.right_table.columnWidth(0)
+        initial_h = window.right_table.rowHeight(0)
+        window.right_table.cellDoubleClicked.emit(0, 0)
+        self.app.processEvents()
+
+        self.assertGreater(window.right_table.columnWidth(0), initial_w)
+        self.assertGreater(window.right_table.rowHeight(0), initial_h)
+        # 左右表格保持同步
+        self.assertEqual(
+            window.left_table.columnWidth(0),
+            window.right_table.columnWidth(0),
+        )
+        self.assertEqual(
+            window.left_table.rowHeight(0),
+            window.right_table.rowHeight(0),
+        )
+        window.close()
 
 
 if __name__ == "__main__":

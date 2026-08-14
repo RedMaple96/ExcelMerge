@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 from datetime import datetime
@@ -22,6 +23,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QKeySequence,
     QShortcut,
+    QTextDocument,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -281,10 +283,6 @@ class MainWindow(QMainWindow):
         self.action_column_settings.triggered.connect(self.open_column_settings)
         m_view.addAction(self.action_column_settings)
 
-        self.action_resize_columns = QAction("调整列宽", self)
-        self.action_resize_columns.triggered.connect(self.resize_columns)
-        m_view.addAction(self.action_resize_columns)
-
         self.action_show_birds_eye = QAction("差异缩略图", self)
         self.action_show_birds_eye.setCheckable(True)
         self.action_show_birds_eye.setChecked(True)
@@ -330,7 +328,7 @@ class MainWindow(QMainWindow):
     # 工具栏
     # ------------------------------------------------------------------ #
     def _init_toolbar(self) -> None:
-        """构建水平工具栏：打开左/打开右/保存/交换/上一个差异/下一个差异/统计/列设置/调整列宽/合并。"""
+        """构建水平工具栏：打开左/打开右/保存/交换/上一个差异/下一个差异/统计/列设置/合并。"""
         self.toolbar = QToolBar("主工具栏", self)
         self.toolbar.setMovable(False)
         self.toolbar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
@@ -364,9 +362,6 @@ class MainWindow(QMainWindow):
         )
         self.tb_column_settings = self.toolbar.addAction(
             icon(QStyle.SP_FileDialogDetailedView), "列设置", self.open_column_settings
-        )
-        self.tb_resize_columns = self.toolbar.addAction(
-            icon(QStyle.SP_FileDialogContentsView), "调整列宽", self.resize_columns
         )
         self.tb_merge = self.toolbar.addAction(
             icon(QStyle.SP_DialogApplyButton), "合并", self.merge
@@ -461,6 +456,10 @@ class MainWindow(QMainWindow):
         self.right_table.currentItemChanged.connect(
             lambda cur, prev: self._on_current_cell_changed(self.right_table, cur)
         )
+
+        # 双击未完全显示的单元格：自动调整列宽/行高，完整显示内容
+        self.left_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self.right_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
         # 底部导航栏信号
         self.bottom_bar.sheet_activated.connect(self._on_tab_sheet_activated)
@@ -2358,12 +2357,49 @@ class MainWindow(QMainWindow):
         self.filter_combo.setCurrentIndex(idx)
         self.filter_combo.blockSignals(False)
 
-    def resize_columns(self) -> None:
-        """按内容自动调整列宽。"""
+    def _on_cell_double_clicked(self, row: int, col: int) -> None:
+        """双击单元格：内容未完整显示时，自动调整该列宽与该行高。
+
+        左右两个表格使用同一对齐行列结构，调整会同步应用到两侧，
+        保证并排视图继续对齐。
+        """
+        table = self.sender()
+        if not isinstance(table, QTableWidget):
+            return
+        if row < 0 or col < 0:
+            return
+        item = table.item(row, col)
+        if item is None or not item.text():
+            return
+        self._autofit_cell(row, col, item.text())
+
+    def _autofit_cell(self, row: int, col: int, text: str) -> None:
+        """把指定单元格所在的列宽与行高调整到足够完整显示其文本。"""
+        doc = QTextDocument()
+        doc.setDefaultFont(self.left_table.font())
+        doc.setDocumentMargin(0)
+        doc.setPlainText(text)
+        # 以不换行的理想宽度测量完整单行宽度，再据此得到多行总高度
+        ideal_w = doc.idealWidth()
+        doc.setTextWidth(ideal_w)
+        size = doc.size()
+        needed_w = int(math.ceil(ideal_w)) + 10  # 左右留白与网格线
+        needed_h = int(math.ceil(size.height())) + 4  # 上下留白
+
+        truncated = any(
+            table.columnWidth(col) < needed_w
+            or table.rowHeight(row) < needed_h
+            for table in (self.left_table, self.right_table)
+        )
+        if not truncated:
+            self.update_status("内容已完整显示，无需调整")
+            return
+
         for table in (self.left_table, self.right_table):
-            table.resizeColumnsToContents()
-            # 末列保持拉伸
-            table.horizontalHeader().setStretchLastSection(True)
+            table.setColumnWidth(col, max(table.columnWidth(col), needed_w))
+            table.setRowHeight(row, max(table.rowHeight(row), needed_h))
+        coord = f"{get_column_letter(col + 1)}{row + 1}"
+        self.update_status(f"已调整 {coord} 的列宽与行高，完整显示内容")
 
     # ------------------------------------------------------------------ #
     # 帮助

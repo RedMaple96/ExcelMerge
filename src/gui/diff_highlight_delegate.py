@@ -50,7 +50,11 @@ class DiffHighlightDelegate(QStyledItemDelegate):
 
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
-        text = opt.text
+        # 注意：initStyleOption 会把 "\n" 转成 U+2028，直接用于 HTML 会丢失
+        # 换行，因此这里取原始 item 文本，保证换行能正确转为 <br/>。
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        if not isinstance(text, str):
+            text = ""
 
         selected = bool(opt.state & QStyle.State_Selected)
         highlight_bg = (

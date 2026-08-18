@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import List, Optional, Set
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -459,6 +459,7 @@ class BottomBar(QFrame):
         sheet_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         sheet_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sheet_list.setFocus()
+        font = sheet_list.font()
         for name in self._order:
             tab = self._tabs.get(name)
             item = QListWidgetItem(name, sheet_list)
@@ -466,9 +467,10 @@ class BottomBar(QFrame):
                 item.setIcon(_make_dot_icon("#e53e3e"))
             item.setToolTip(name)
             if name == self._active_name:
-                item.setCheckState(Qt.Checked)
-            else:
-                item.setCheckState(Qt.Unchecked)
+                # 当前激活项用加粗标识（不用复选框，避免首次点击被勾选切换消费掉）
+                item_font = QFont(font)
+                item_font.setBold(True)
+                item.setFont(item_font)
 
         item_height = sheet_list.sizeHintForRow(0)
         preferred_height = max(item_height, 0) * len(self._order) + 12
@@ -480,7 +482,8 @@ class BottomBar(QFrame):
             menu.close()
             self._activate_sheet(item.text())
 
-        sheet_list.itemClicked.connect(activate)
+        # 用 itemPressed：按下即激活，避免首次点击被菜单吞掉导致切换失败
+        sheet_list.itemPressed.connect(activate)
         sheet_list.itemActivated.connect(activate)
 
         action = QWidgetAction(self)

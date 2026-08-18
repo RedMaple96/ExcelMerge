@@ -1,21 +1,11 @@
-"""软件许可证（密匙）模块 — 一机一码。
+"""ExcelMerge 在线授权模块。
 
-提供机器码生成、密匙生成/校验、机器绑定与激活状态持久化。
-
-一机一码流程：
-1. 用户启动软件，未激活时对话框显示本机「机器码」(XXXX-XXXX-XXXX)。
-2. 用户将机器码发给开发者。
-3. 开发者运行 ``python -m src.utils.license <机器码>`` 生成该机器专属密匙。
-4. 用户输入密匙，校验通过且机器码匹配本机后激活。
-
-密匙格式: ``XXXX-XXXX-XXXX-XXXX-XXXX``（5 组 4 位十六进制，不区分大小写）。
-  - 前 3 组：目标机器的机器码。
-  - 后 2 组：对机器码的 HMAC-SHA256 截断签名（8 位十六进制）。
-校验方式: 离线自校验，无需联网。密匙内嵌机器码，无法在其他机器使用。
-激活状态: 写入用户配置目录下的 ``license.dat``，绑定本机 machine_id，
-         复制激活文件到其他机器无效。
-
-开发者可通过 ``python -m src.utils.license <机器码>`` 生成专属密匙。
+授权流程与独立 activation-server 配合：
+1. 客户端生成稳定设备指纹；
+2. 用户可自助申请 30 天授权码；
+3. 在线激活后服务端返回设备绑定 token；
+4. 客户端保存签名后的授权记录并定期在线校验；
+5. 网络不可用时允许 7 天离线宽限期。
 """
 
 from __future__ import annotations
@@ -25,148 +15,150 @@ import hmac
 import json
 import os
 import platform
+import socket
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
-# 内嵌签名密钥（用于离线校验，不要外泄）
-_SECRET = b"ExcelMerge-License-v1-7f3a9c2e"
+from src import __version__ as APP_VERSION
+
+DEFAULT_ACTIVATION_SERVER_URL = "http://49.232.103.38:6005"
+ACTIVATION_SERVER_URL = os.environ.get(
+    "EXCEL_MERGE_ACTIVATION_SERVER", DEFAULT_ACTIVATION_SERVER_URL
+).rstrip("/")
 
 _APP_DIR_NAME = "ExcelMerge"
-_LICENSE_FILE = "license.dat"
+_LICENSE_FILE = "license.json"
+_LAST_KNOWN_TIME_FILE = "last-known-time"
+_REQUEST_TIMEOUT_SECONDS = 12
+_GRACE_PERIOD_SECONDS = 7 * 24 * 60 * 60
+_TIME_ROLLBACK_TOLERANCE_SECONDS = 60
 
-_HEXCHARS = set("0123456789ABCDEF")
-
-
-# ---------------------------------------------------------------------- #
-# 辅助
-# ---------------------------------------------------------------------- #
-def _normalize_hex(text: str) -> str:
-    """提取文本中的十六进制字符并大写（去除连字符/空格等分隔符）。"""
-    return "".join(c for c in text.upper() if c in _HEXCHARS)
-
-
-def _sign(payload: str) -> str:
-    """对载荷取 HMAC-SHA256 的前 8 位十六进制作为签名（大写）。"""
-    digest = hmac.new(
-        _SECRET, payload.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
-    return digest[:8].upper()
+# 本地文件防普通篡改。桌面客户端无法保存绝对安全的私密密钥；
+# 授权有效性最终仍由远程服务端控制。
+_SECRET_PARTS = ("ExcelMerge", "License", "v2", "2026")
+_LICENSE_SECRET = "-".join(_SECRET_PARTS).encode("utf-8")
 
 
-# ---------------------------------------------------------------------- #
-# 机器标识
-# ---------------------------------------------------------------------- #
+class ActivationError(Exception):
+    """远程激活服务返回的可展示错误。"""
+
+    def __init__(self, message: str, code: str = "SERVER_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class NetworkError(Exception):
+    """无法连接激活服务。"""
+
+
 def _raw_machine_id() -> str:
-    """获取操作系统级别的稳定机器标识（跨平台）。"""
-    sysname = platform.system()
+    """获取操作系统级稳定机器标识。"""
+    system = platform.system()
     try:
-        if sysname == "Darwin":
-            out = subprocess.run(
+        if system == "Darwin":
+            output = subprocess.run(
                 ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            for line in out.stdout.splitlines():
+            for line in output.stdout.splitlines():
                 if "IOPlatformUUID" in line:
                     return line.split("=", 1)[1].strip().strip('"')
-        elif sysname == "Windows":
+        elif system == "Windows":
             import winreg  # type: ignore
 
             with winreg.OpenKey(
                 winreg.HKEY_LOCAL_MACHINE,
                 r"SOFTWARE\Microsoft\Cryptography",
-            ) as regkey:
-                guid, _ = winreg.QueryValueEx(regkey, "MachineGuid")
-                return str(guid)
-        elif sysname == "Linux":
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "MachineGuid")
+                return str(value)
+        elif system == "Linux":
             for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        content = f.read().strip()
+                    with open(path, "r", encoding="utf-8") as file:
+                        content = file.read().strip()
                         if content:
                             return content
                 except OSError:
                     continue
     except Exception:  # noqa: BLE001
         pass
-    # 兜底：uuid.getnode()（通常为 MAC 地址）
     return f"uuid-{uuid.getnode()}"
 
 
-def get_machine_id() -> str:
-    """返回当前机器的稳定哈希标识（32 位十六进制，内部防篡改用）。"""
-    raw = _raw_machine_id()
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+def get_machine_fingerprint() -> str:
+    """返回 32 位十六进制设备指纹。"""
+    seed = f"{_raw_machine_id()}::{uuid.getnode()}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
-def get_machine_code() -> str:
-    """返回当前机器的机器码（XXXX-XXXX-XXXX，12 位十六进制，对外展示）。
-
-    机器码是本机硬件标识的哈希截断，用户可将其发送给开发者以换取专属密匙。
-    """
-    raw = _raw_machine_id()
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    code = digest[:12].upper()
-    return f"{code[0:4]}-{code[4:8]}-{code[8:12]}"
+def get_machine_label() -> str:
+    return f"{platform.system()}/{socket.gethostname()}"
 
 
-# ---------------------------------------------------------------------- #
-# 密匙生成与校验
-# ---------------------------------------------------------------------- #
-def generate_key(machine_code: str) -> str:
-    """为指定机器码生成专属密匙（一机一码）。
+def _memory_gb() -> int:
+    try:
+        if platform.system() == "Darwin":
+            output = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            return round(int(output.stdout.strip()) / 1024**3)
+        if platform.system() == "Linux":
+            with open("/proc/meminfo", "r", encoding="utf-8") as file:
+                for line in file:
+                    if line.startswith("MemTotal:"):
+                        return round(int(line.split()[1]) / 1024**2)
+        if platform.system() == "Windows":
+            import ctypes
 
-    machine_code 可含连字符/空格，本函数会归一化。
-    返回 ``XXXX-XXXX-XXXX-XXXX-XXXX``：前 3 组为机器码，后 2 组为签名。
-    """
-    mc = _normalize_hex(machine_code)
-    if len(mc) != 12:
-        raise ValueError("机器码必须为 12 位十六进制（格式 XXXX-XXXX-XXXX）")
-    sig = _sign(mc)
-    return f"{mc[0:4]}-{mc[4:8]}-{mc[8:12]}-{sig[0:4]}-{sig[4:8]}"
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                ]
 
-
-def validate_key(key: str) -> bool:
-    """校验密匙格式与签名（不校验机器绑定，绑定请用 key_matches_machine）。"""
-    if not key:
-        return False
-    hexstr = _normalize_hex(key)
-    if len(hexstr) != 20:
-        return False
-    mc = hexstr[:12]
-    sig = hexstr[12:]
-    expected = _sign(mc)
-    return hmac.compare_digest(expected, sig)
-
-
-def key_matches_machine(key: str, machine_code: str) -> bool:
-    """判断密匙是否绑定指定机器码（密匙内嵌的机器码须与之一致）。"""
-    if not validate_key(key):
-        return False
-    key_mc = _normalize_hex(key)[:12]
-    target_mc = _normalize_hex(machine_code)
-    if len(target_mc) != 12:
-        return False
-    return key_mc == target_mc
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return round(status.ullTotalPhys / 1024**3)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
 
 
-# ---------------------------------------------------------------------- #
-# 激活状态持久化
-# ---------------------------------------------------------------------- #
+def get_device_info() -> Dict[str, Any]:
+    """返回服务端后台展示所需的脱敏设备信息。"""
+    return {
+        "platform": platform.system(),
+        "osVersion": platform.version(),
+        "hostname": socket.gethostname(),
+        "arch": platform.machine(),
+        "cpuCores": os.cpu_count() or 0,
+        "memoryGB": _memory_gb(),
+        "appVersion": APP_VERSION,
+        "pythonVersion": platform.python_version(),
+    }
+
+
 def _config_dir() -> str:
-    """返回跨平台的用户配置目录。"""
     if sys.platform == "darwin":
         base = os.path.expanduser("~/Library/Application Support")
     elif os.name == "nt":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
     else:
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser(
-            "~/.config"
-        )
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     return os.path.join(base, _APP_DIR_NAME)
 
 
@@ -174,97 +166,284 @@ def _license_path() -> str:
     return os.path.join(_config_dir(), _LICENSE_FILE)
 
 
-def is_activated() -> bool:
-    """检查本机是否已用合法密匙激活（且密匙绑定当前机器）。"""
-    path = _license_path()
-    if not os.path.exists(path):
-        return False
+def _last_known_time_path() -> str:
+    return os.path.join(_config_dir(), _LAST_KNOWN_TIME_FILE)
+
+
+def _canonical_record(record: Dict[str, Any]) -> str:
+    return json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _sign_record(record: Dict[str, Any]) -> str:
+    return hmac.new(
+        _LICENSE_SECRET,
+        _canonical_record(record).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _atomic_write(path: str, content: str) -> None:
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = f"{path}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as file:
+        file.write(content)
+        file.flush()
+        os.fsync(file.fileno())
+    os.chmod(temporary_path, 0o600)
+    os.replace(temporary_path, path)
+
+
+def _write_last_known_time(timestamp: int) -> None:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        _atomic_write(_last_known_time_path(), str(timestamp))
+    except OSError:
+        pass
+
+
+def _read_last_known_time() -> Optional[int]:
+    try:
+        with open(_last_known_time_path(), "r", encoding="utf-8") as file:
+            value = int(file.read().strip())
+        return value if value > 0 else None
     except (OSError, ValueError):
-        return False
-    machine_id = data.get("machine_id")
-    key = data.get("key")
-    if not machine_id or not key:
-        return False
-    # 防复制：激活文件中的 machine_id 须匹配本机
-    if machine_id != get_machine_id():
-        return False
-    if not validate_key(key):
-        return False
-    # 一机一码：密匙内嵌的机器码须匹配本机
-    return key_matches_machine(key, get_machine_code())
+        return None
 
 
-def activate(key: str) -> bool:
-    """用密匙激活本机。成功返回 True 并持久化，失败返回 False。
+def _normalize_expires_at(value: Any) -> Optional[int]:
+    """兼容服务端 JavaScript Date.now() 的毫秒时间戳。"""
+    if value is None:
+        return None
+    timestamp = int(value)
+    if timestamp > 10_000_000_000:
+        timestamp = timestamp // 1000
+    return timestamp
 
-    密匙必须合法且绑定当前机器（一机一码），否则拒绝激活。
-    """
-    if not validate_key(key):
-        return False
-    if not key_matches_machine(key, get_machine_code()):
-        return False
-    config_dir = _config_dir()
+
+def _write_license(record: Dict[str, Any]) -> bool:
     try:
-        os.makedirs(config_dir, exist_ok=True)
+        signed = dict(record)
+        signed["signature"] = _sign_record(record)
+        _atomic_write(
+            _license_path(), json.dumps(signed, ensure_ascii=False, indent=2)
+        )
+        _write_last_known_time(int(time.time()))
+        return True
     except OSError:
         return False
-    data = {
-        "machine_id": get_machine_id(),
-        "machine_code": get_machine_code(),
-        "key": _normalize_hex(key),
-        "activated_at": datetime.now().isoformat(timespec="seconds"),
+
+
+def read_license() -> Optional[Dict[str, Any]]:
+    """读取并验签本地授权记录，旧 license.dat 永远不会被读取。"""
+    try:
+        with open(_license_path(), "r", encoding="utf-8") as file:
+            signed = json.load(file)
+        if not isinstance(signed, dict):
+            return None
+        signature = signed.get("signature")
+        if not isinstance(signature, str):
+            return None
+        record = dict(signed)
+        record.pop("signature", None)
+        expected = _sign_record(record)
+        if not hmac.compare_digest(signature, expected):
+            return None
+        return record
+    except (OSError, ValueError):
+        return None
+
+
+def _post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"{ACTIVATION_SERVER_URL}{path}",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": f"ExcelMerge/{APP_VERSION}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            raw = response.read(1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read(1024 * 1024)
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            data = {}
+        if exc.code >= 500:
+            raise NetworkError(f"激活服务错误({exc.code})") from exc
+        raise ActivationError(
+            str(data.get("error") or f"激活服务错误({exc.code})"),
+            str(data.get("code") or f"HTTP_{exc.code}"),
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise NetworkError(f"无法连接激活服务: {exc}") from exc
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise NetworkError("激活服务返回格式错误") from exc
+    if not isinstance(data, dict):
+        raise NetworkError("激活服务返回格式错误")
+    return data
+
+
+def request_code() -> Dict[str, Any]:
+    """为当前设备自助申请 30 天授权码。"""
+    data = _post_json(
+        "/api/request-code",
+        {
+            "machineFingerprint": get_machine_fingerprint(),
+            "machineLabel": get_machine_label(),
+            "deviceInfo": get_device_info(),
+        },
+    )
+    if data.get("ok") and data.get("licenseCode"):
+        return {"ok": True, "licenseCode": data["licenseCode"]}
+    raise ActivationError(
+        str(data.get("error") or "获取授权码失败"),
+        str(data.get("code") or "REQUEST_CODE_FAILED"),
+    )
+
+
+def activate(license_code: str) -> Dict[str, Any]:
+    """在线激活当前设备并保存服务端 token。"""
+    code = license_code.strip()
+    if not code:
+        raise ActivationError("请输入授权码", "EMPTY_CODE")
+    fingerprint = get_machine_fingerprint()
+    data = _post_json(
+        "/api/activate",
+        {
+            "licenseCode": code,
+            "machineFingerprint": fingerprint,
+            "machineLabel": get_machine_label(),
+            "deviceInfo": get_device_info(),
+            "appVersion": APP_VERSION,
+        },
+    )
+    token = data.get("token")
+    if not data.get("ok") or not isinstance(token, str) or not token:
+        raise ActivationError(
+            str(data.get("error") or "激活失败"),
+            str(data.get("code") or "ACTIVATE_FAILED"),
+        )
+    now = int(time.time())
+    record = {
+        "licenseCode": code,
+        "machineFingerprint": fingerprint,
+        "token": token,
+        "activatedAt": now,
+        "expiresAt": _normalize_expires_at(data.get("expiresAt")),
+        "lastVerifiedAt": now,
     }
+    if not _write_license(record):
+        raise ActivationError("无法写入本地授权文件，请检查文件权限", "WRITE_FAILED")
+    return {"ok": True, "token": token, "expiresAt": data.get("expiresAt")}
+
+
+def _offline_check(record: Dict[str, Any]) -> Dict[str, Any]:
+    now = int(time.time())
+    last_known = _read_last_known_time()
+    if last_known is not None and now < last_known - _TIME_ROLLBACK_TOLERANCE_SECONDS:
+        return {"ok": False, "reason": "grace-expired"}
+    expires_at = record.get("expiresAt")
+    if expires_at is not None and int(expires_at) < now:
+        return {"ok": False, "reason": "expired"}
+    if now - int(record["lastVerifiedAt"]) < _GRACE_PERIOD_SECONDS:
+        return {"ok": True, "reason": "offline-grace"}
+    return {"ok": False, "reason": "grace-expired"}
+
+
+def check_license() -> Dict[str, Any]:
+    """校验本地授权并联系远程服务确认撤销、过期与设备绑定状态。"""
+    record = read_license()
+    if record is None:
+        return {"ok": False, "reason": "no-license"}
+    fingerprint = get_machine_fingerprint()
+    if record.get("machineFingerprint") != fingerprint:
+        return {"ok": False, "reason": "machine-mismatch"}
     try:
-        with open(_license_path(), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        data = _post_json(
+            "/api/verify",
+            {
+                "token": record.get("token"),
+                "machineFingerprint": fingerprint,
+                "appVersion": APP_VERSION,
+                "deviceInfo": get_device_info(),
+            },
+        )
+    except NetworkError:
+        return _offline_check(record)
+    except ActivationError as exc:
+        if exc.code == "RATE_LIMITED":
+            return _offline_check(record)
+        return {"ok": False, "reason": "network-error", "detail": str(exc)}
+
+    if data.get("valid"):
+        record["lastVerifiedAt"] = int(time.time())
+        if "expiresAt" in data:
+            record["expiresAt"] = _normalize_expires_at(data.get("expiresAt"))
+        if not _write_license(record):
+            return {"ok": False, "reason": "write-failed"}
+        return {"ok": True, "reason": "verified"}
+
+    reason = str(data.get("reason") or "revoked")
+    if reason == "LICENSE_EXPIRED":
+        return {"ok": False, "reason": "expired", "detail": reason}
+    if reason == "VERSION_TOO_LOW":
+        return {
+            "ok": False,
+            "reason": "version-too-low",
+            "detail": str(data.get("message") or reason),
+        }
+    return {"ok": False, "reason": "revoked", "detail": reason}
+
+
+def is_activated() -> bool:
+    """仅检查本地记录是否可在离线宽限期内使用。"""
+    record = read_license()
+    if record is None:
+        return False
+    if record.get("machineFingerprint") != get_machine_fingerprint():
+        return False
+    return _offline_check(record).get("ok", False)
+
+
+def clear_local_activation() -> bool:
+    """清除本机授权缓存；服务端设备席位需在管理后台释放。"""
+    try:
+        os.remove(_license_path())
+        os.remove(_last_known_time_path())
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
     return True
 
 
-def deactivate() -> bool:
-    """移除本机激活状态（删除激活文件）。返回是否已不存在激活文件。"""
-    path = _license_path()
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-        except OSError:
-            return False
-    return True
-
-
-def activation_info() -> Optional[dict]:
-    """返回激活信息字典（未激活或读取失败返回 None）。
-
-    仅读取文件内容，不校验有效性；如需校验请配合 is_activated()。
-    """
-    path = _license_path()
-    if not os.path.exists(path):
+def activation_info() -> Optional[Dict[str, Any]]:
+    """返回本地授权摘要。"""
+    record = read_license()
+    if record is None:
         return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
-
-
-def _format_key(hex_str: str, groups: int = 5) -> str:
-    """将连续十六进制串按 4 位分组并用连字符连接（默认 5 组）。"""
-    parts = [hex_str[i : i + 4] for i in range(0, len(hex_str), 4)]
-    return "-".join(parts[:groups])
-
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        try:
-            print(generate_key(sys.argv[1]))
-        except ValueError as exc:
-            print(f"错误: {exc}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        print("用法: python -m src.utils.license <机器码>")
-        print(f"本机机器码: {get_machine_code()}")
-        sys.exit(1)
+    result = dict(record)
+    result.pop("token", None)
+    result["activatedAtText"] = datetime.fromtimestamp(
+        int(record["activatedAt"])
+    ).isoformat(timespec="seconds")
+    result["lastVerifiedAtText"] = datetime.fromtimestamp(
+        int(record["lastVerifiedAt"])
+    ).isoformat(timespec="seconds")
+    result["expiresAtText"] = (
+        datetime.fromtimestamp(
+            _normalize_expires_at(record.get("expiresAt"))
+        ).isoformat(timespec="seconds")
+        if record.get("expiresAt") is not None
+        else "永久"
+    )
+    result["serverUrl"] = ACTIVATION_SERVER_URL
+    return result

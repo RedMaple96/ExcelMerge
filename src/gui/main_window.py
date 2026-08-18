@@ -2734,42 +2734,39 @@ class MainWindow(QMainWindow):
         )
 
     def show_license_status(self) -> None:
-        """展示当前许可证激活状态，并提供解除激活入口。"""
+        """展示在线授权状态，并支持立即联网校验。"""
         from src.utils import license
 
-        machine_code = license.get_machine_code()
         info = license.activation_info()
-        if info and license.is_activated():
-            key = info.get("key", "")
-            at = info.get("activated_at", "")
+        if info:
             box = QMessageBox(self)
             box.setWindowTitle("许可证状态")
             box.setIcon(QMessageBox.Information)
+            license_code = info.get("licenseCode", "")
+            verify_btn = box.addButton("立即校验", QMessageBox.AcceptRole)
+            close_btn = box.addButton("关闭", QMessageBox.RejectRole)
             box.setText(
-                f"软件已激活（一机一码）\n\n"
-                f"本机机器码: {machine_code}\n"
-                f"密匙: {key}\n"
-                f"激活时间: {at}"
+                f"软件已在线激活\n\n"
+                f"激活时间: {info.get('activatedAtText', '')}\n"
+                f"到期时间: {info.get('expiresAtText', '')}\n"
+                f"最近校验: {info.get('lastVerifiedAtText', '')}\n"
             )
-            ok_btn = box.addButton("确定", QMessageBox.AcceptRole)
-            deact_btn = box.addButton("解除激活", QMessageBox.DestructiveRole)
-            # 显式设置 Escape 按钮：窗口 X 关闭按钮与 Escape 键会触发它，
-            # 否则因无 RejectRole 按钮会导致 X 无法关闭弹窗。
-            box.setEscapeButton(ok_btn)
+            box.setEscapeButton(close_btn)
             box.exec()
-            if box.clickedButton() is deact_btn:
-                if license.deactivate():
-                    QMessageBox.information(
-                        self, "许可证",
-                        "已解除激活，重启后将要求重新输入密匙。",
-                    )
+            if box.clickedButton() is verify_btn:
+                result = license.check_license()
+                if result.get("ok"):
+                    QMessageBox.information(self, "许可证状态", "在线校验通过。")
                 else:
-                    QMessageBox.warning(self, "许可证", "解除激活失败。")
+                    QMessageBox.warning(
+                        self,
+                        "许可证状态",
+                        f"校验未通过: {result.get('reason', '')}\n{result.get('detail', '')}",
+                    )
         else:
             QMessageBox.information(
                 self, "许可证状态",
-                f"软件未激活。\n\n本机机器码: {machine_code}\n"
-                "请将机器码发送给开发者获取专属密匙。",
+                "软件未激活。\n\n重启应用后可自助申请 30 天授权码并在线激活。",
             )
 
     def show_shortcuts(self) -> None:

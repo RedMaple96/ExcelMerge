@@ -1,14 +1,10 @@
-"""软件激活对话框 — LicenseDialog(QDialog)（一机一码）。
-
-应用启动时若本机未激活，弹出此对话框：
-1. 展示本机「机器码」，用户将其发送给开发者换取专属密匙；
-2. 用户输入密匙，校验通过且绑定本机后激活并进入主界面；
-3. 取消则退出应用。
-"""
+"""ExcelMerge 在线授权激活对话框。"""
 
 from __future__ import annotations
 
-from PySide6.QtGui import QFont
+from typing import Callable
+
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -23,140 +19,119 @@ from PySide6.QtWidgets import (
 )
 
 from src.utils import license
+from src.utils.license import ActivationError, NetworkError
+
+
+class _ActivationWorker(QThread):
+    finished_with_result = Signal(dict)
+
+    def __init__(self, task: Callable[[], dict], parent: QDialog) -> None:
+        super().__init__(parent)
+        self._task = task
+
+    def run(self) -> None:
+        try:
+            result = self._task()
+        except ActivationError as exc:
+            result = {"ok": False, "error": str(exc), "code": exc.code}
+        except NetworkError as exc:
+            result = {"ok": False, "error": str(exc), "code": "NETWORK_ERROR"}
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "error": f"未知错误: {exc}", "code": "UNKNOWN"}
+        self.finished_with_result.emit(result)
 
 
 class LicenseDialog(QDialog):
-    """密匙激活对话框（一机一码）。"""
+    """在线申请授权码并激活当前设备。"""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, initial_message: str = "", parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("ExcelMerge — 软件激活")
-        self.setModal(True)
+        self.setWindowTitle("在线授权激活")
         self.setMinimumWidth(480)
+        self._worker: _ActivationWorker | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("软件激活")
-        title_font = QFont()
-        title_font.setPointSize(16)
-        title_font.setBold(True)
-        title.setFont(title_font)
+        title = QLabel("ExcelMerge 在线授权")
+        title.setStyleSheet("font-size: 16px; font-weight: 600;")
         layout.addWidget(title)
+        layout.addWidget(QLabel("可自助申请 30 天授权码，授权会绑定当前设备。"))
 
-        intro = QLabel(
-            "本软件采用一机一码授权。请按以下步骤激活：\n"
-            "1. 复制下方「本机机器码」并发送给开发者，邮箱：1316956151@qq.com；\n"
-            "2. 将开发者提供的专属密匙填入输入框并点击「激活」。\n"
-            "密匙仅对当前机器有效，激活后本机无需再次输入。"
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
+        fingerprint_layout = QHBoxLayout()
+        fingerprint_label = QLabel("设备指纹:")
+        self.fingerprint_edit = QLineEdit(license.get_machine_fingerprint())
+        self.fingerprint_edit.setReadOnly(True)
+        copy_button = QPushButton("复制")
+        copy_button.clicked.connect(self._copy_fingerprint)
+        fingerprint_layout.addWidget(fingerprint_label)
+        fingerprint_layout.addWidget(self.fingerprint_edit, 1)
+        fingerprint_layout.addWidget(copy_button)
+        layout.addLayout(fingerprint_layout)
 
-        # ---- 机器码展示区 ----
-        mc_layout = QHBoxLayout()
-        mc_layout.setSpacing(8)
-        mc_label = QLabel("本机机器码:")
-        mc_label.setStyleSheet("font-weight: 600;")
-        self.machine_code_edit = QLineEdit(license.get_machine_code())
-        self.machine_code_edit.setReadOnly(True)
-        self.machine_code_edit.setStyleSheet(
-            "font-family: Menlo, Consolas, monospace; font-size: 14px;"
-        )
-        copy_btn = QPushButton("复制")
-        copy_btn.clicked.connect(self._copy_machine_code)
-        mc_layout.addWidget(mc_label)
-        mc_layout.addWidget(self.machine_code_edit, 1)
-        mc_layout.addWidget(copy_btn)
-        layout.addLayout(mc_layout)
-
-        # ---- 密匙输入区 ----
         form = QFormLayout()
-        form.setSpacing(8)
-        self.key_edit = QLineEdit()
-        self.key_edit.setPlaceholderText("XXXX-XXXX-XXXX-XXXX-XXXX")
-        self.key_edit.setMaxLength(24)  # 5*4 + 4 连字符
-        self.key_edit.textChanged.connect(self._on_text_changed)
-        self.key_edit.returnPressed.connect(self._on_activate)
-        form.addRow("密匙:", self.key_edit)
+        self.code_edit = QLineEdit()
+        self.code_edit.setPlaceholderText("EM-XXXXXXXXXXXXXXXX")
+        self.code_edit.setMaxLength(19)
+        self.code_edit.returnPressed.connect(self._on_activate)
+        form.addRow("授权码:", self.code_edit)
         layout.addLayout(form)
 
-        self.hint_label = QLabel(" ")
-        self.hint_label.setStyleSheet("color: #B22222;")
+        self.hint_label = QLabel(initial_message or " ")
         self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet("color: #B22222;")
         layout.addWidget(self.hint_label)
-
         layout.addStretch(1)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-        self._ok_button = buttons.button(QDialogButtonBox.Ok)
-        self._ok_button.setText("激活")
-        cancel_button = buttons.button(QDialogButtonBox.Cancel)
-        cancel_button.setText("退出")
-        self._ok_button.clicked.connect(self._on_activate)
-        cancel_button.clicked.connect(self.reject)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.get_code_button = QPushButton("获取授权码")
+        buttons.addButton(self.get_code_button, QDialogButtonBox.ActionRole)
+        self.activate_button = buttons.button(QDialogButtonBox.Ok)
+        self.activate_button.setText("在线激活")
+        exit_button = buttons.button(QDialogButtonBox.Cancel)
+        exit_button.setText("退出")
+        self.get_code_button.clicked.connect(self._on_request_code)
+        self.activate_button.clicked.connect(self._on_activate)
+        exit_button.clicked.connect(self.reject)
         layout.addWidget(buttons)
 
-        self._ok_button.setEnabled(False)
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        self.get_code_button.setEnabled(not busy)
+        self.activate_button.setEnabled(not busy)
+        if message:
+            self.hint_label.setText(message)
 
-    # ------------------------------------------------------------------ #
-    # 机器码
-    # ------------------------------------------------------------------ #
-    def _copy_machine_code(self) -> None:
-        """复制本机机器码到系统剪贴板。"""
-        QApplication.clipboard().setText(self.machine_code_edit.text())
+    def _copy_fingerprint(self) -> None:
+        QApplication.clipboard().setText(self.fingerprint_edit.text())
         self.hint_label.setStyleSheet("color: #2A7A2A;")
-        self.hint_label.setText("机器码已复制，请发送给开发者")
-        self.hint_label.setStyleSheet("color: #B22222;")
+        self.hint_label.setText("设备指纹已复制")
 
-    # ------------------------------------------------------------------ #
-    # 输入处理
-    # ------------------------------------------------------------------ #
-    def _on_text_changed(self, text: str) -> None:
-        """自动格式化输入（大写、分组、仅十六进制）并实时校验。"""
-        cleaned = license._normalize_hex(text)
-        cleaned = cleaned[:20]
-        formatted = license._format_key(cleaned)
-        if formatted != text:
-            self.key_edit.blockSignals(True)
-            self.key_edit.setText(formatted)
-            self.key_edit.blockSignals(False)
+    def _start_worker(self, task: Callable[[], dict]) -> None:
+        self._worker = _ActivationWorker(task, self)
+        self._worker.finished_with_result.connect(self._on_worker_result)
+        self._worker.start()
 
-        valid = license.validate_key(formatted)
-        self._ok_button.setEnabled(valid)
-        if valid:
-            self.hint_label.setText(" ")
-        elif len(cleaned) == 20:
-            self.hint_label.setText("密匙签名无效")
-        else:
-            self.hint_label.setText("密匙格式不正确")
+    def _on_request_code(self) -> None:
+        self._set_busy(True, "正在获取授权码…")
+        self._start_worker(license.request_code)
 
     def _on_activate(self) -> None:
-        """点击激活：校验格式、机器绑定并持久化，成功后关闭对话框。"""
-        key = self.key_edit.text()
-        if not license.validate_key(key):
-            self.hint_label.setText("密匙无效，请检查后重试")
+        code = self.code_edit.text().strip()
+        if not code:
+            self.hint_label.setText("请输入授权码")
             return
-        if not license.key_matches_machine(key, license.get_machine_code()):
-            self.hint_label.setText("此密匙非本机专属，无法激活")
+        self._set_busy(True, "正在在线激活…")
+        self._start_worker(lambda: license.activate(code))
+
+    def _on_worker_result(self, result: dict) -> None:
+        if result.get("ok") and result.get("licenseCode"):
+            self.code_edit.setText(str(result["licenseCode"]))
+            self.hint_label.setStyleSheet("color: #2A7A2A;")
+            self.hint_label.setText("授权码已获取，请点击“在线激活”")
+            self._set_busy(False)
             return
-        if license.activate(key):
+        if result.get("ok"):
+            self.hint_label.setStyleSheet("color: #2A7A2A;")
+            self.hint_label.setText("激活成功")
             self.accept()
-        else:
-            QMessageBox.critical(
-                self,
-                "激活失败",
-                "无法写入激活信息，请检查文件权限后重试。",
-            )
-
-
-if __name__ == "__main__":
-    import sys
-
-    app = QApplication(sys.argv)
-    dlg = LicenseDialog()
-    if dlg.exec() == QDialog.Accepted:
-        print("已激活")
+            return
+        self.hint_label.setStyleSheet("color: #B22222;")
+        self._set_busy(False, str(result.get("error") or "操作失败"))

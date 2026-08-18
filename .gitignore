@@ -12,6 +12,7 @@ env/
 # 构建产物
 build/
 dist/
+excel-activation-server/
 *.spec
 !ExcelMerge.spec
 .pyinstaller_cache/
@@ -30,3 +31,5 @@ dist/
 .coverage
 .mypy_cache/
 .ruff_cache/
+test/
+test_cache/

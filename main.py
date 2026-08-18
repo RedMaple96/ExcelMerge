@@ -119,9 +119,19 @@ def main() -> int:
     # 应用浅色/深色主题（Task 6.4 / Task 11.2）
     apply_theme(app)
 
-    # 密匙激活校验：未激活则弹出激活对话框，取消激活则退出应用
-    if not license.is_activated():
-        dlg = LicenseDialog()
+    # 在线授权校验：失败时进入远程激活流程，取消激活则退出应用
+    check_result = license.check_license()
+    if not check_result.get("ok"):
+        reason = check_result.get("reason", "")
+        messages = {
+            "no-license": "尚未激活，请获取授权码并在线激活",
+            "machine-mismatch": "检测到设备环境变化，请重新激活",
+            "expired": "授权已过期，请获取新授权码",
+            "revoked": "授权已被撤销，请联系管理员",
+            "grace-expired": "离线时间超过 7 天，请联网重新验证或重新激活",
+            "version-too-low": str(check_result.get("detail") or "客户端版本过低，请升级后重试"),
+        }
+        dlg = LicenseDialog(messages.get(reason, "授权校验失败，请重新激活"))
         if dlg.exec() != QDialog.Accepted:
             return 0
 

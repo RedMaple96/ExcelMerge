@@ -18,11 +18,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QWidget,
+    QWidgetAction,
 )
 
 # 固定的图标尺寸，保持有无红点时文本对齐一致
@@ -445,27 +448,51 @@ class BottomBar(QFrame):
 
         - 有差异的标签前显示红点图标
         - 当前激活标签打勾
-        - 点击即切换并滚动到该标签
+        - 列表内容过高时可通过滚轮/滚动条正常滚动
         """
         btn = self.sender()
         if btn is None:
             return
         if not self._order:
             return
-        menu = QMenu(self)
-        menu.setToolTipsVisible(True)
+        sheet_list = QListWidget(self)
+        sheet_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sheet_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sheet_list.setFocus()
         for name in self._order:
             tab = self._tabs.get(name)
-            action = menu.addAction(name)
+            item = QListWidgetItem(name, sheet_list)
             if tab is not None and tab._has_diff:
-                action.setIcon(_make_dot_icon("#e53e3e"))
+                item.setIcon(_make_dot_icon("#e53e3e"))
+            item.setToolTip(name)
             if name == self._active_name:
-                action.setCheckable(True)
-                action.setChecked(True)
-        chosen = menu.exec(btn.mapToGlobal(pos))
-        if chosen is not None and chosen.text() != self._active_name:
-            self.set_active(chosen.text())
-            self.sheet_activated.emit(chosen.text())
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+
+        item_height = sheet_list.sizeHintForRow(0)
+        preferred_height = max(item_height, 0) * len(self._order) + 12
+        max_height = self.screen().availableGeometry().height() - 80
+        sheet_list.setFixedHeight(max(120, min(preferred_height, max_height, 420)))
+        sheet_list.setMinimumWidth(220)
+
+        def activate(item: QListWidgetItem) -> None:
+            menu.close()
+            self._activate_sheet(item.text())
+
+        sheet_list.itemClicked.connect(activate)
+        sheet_list.itemActivated.connect(activate)
+
+        action = QWidgetAction(self)
+        action.setDefaultWidget(sheet_list)
+        menu = QMenu(self)
+        menu.addAction(action)
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _activate_sheet(self, name: str) -> None:
+        if name and name != self._active_name:
+            self.set_active(name)
+            self.sheet_activated.emit(name)
 
     # ------------------------------------------------------------------ #
     # 事件

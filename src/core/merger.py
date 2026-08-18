@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+from copy import copy
 from typing import List, Optional, Tuple
 
+from openpyxl import Workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -26,6 +28,52 @@ class ExcelMerger:
     所有方法均直接修改传入 SheetData 中的 worksheet 对象（就地修改），
     调用方负责后续保存工作簿。
     """
+
+    @staticmethod
+    def copy_sheet_to_workbook(
+        source: SheetData, target_wb: Workbook, sheet_name: Optional[str] = None
+    ) -> Worksheet:
+        """跨工作簿整表复制一个工作表。"""
+        title = sheet_name or source.worksheet.title
+        if title in target_wb.sheetnames:
+            raise ValueError(f"目标工作簿已存在工作表: {title}")
+
+        source_ws = source.worksheet
+        target_ws = target_wb.create_sheet(title)
+        cached_values = source.cached_values or []
+
+        for row, col, src_cell in ExcelLoader._iter_cells(source_ws):
+            tgt_cell = target_ws.cell(row=row, column=col)
+            cached_value = None
+            if row <= len(cached_values):
+                source_row = cached_values[row - 1]
+                if col <= len(source_row):
+                    cached_value = source_row[col - 1]
+            ExcelLoader.copy_cell_value(src_cell, tgt_cell, cached_value)
+            ExcelLoader.copy_cell_style(src_cell, tgt_cell)
+
+        for merged_range in source_ws.merged_cells.ranges:
+            target_ws.merge_cells(str(merged_range))
+
+        for row_key, row_dim in source_ws.row_dimensions.items():
+            target_dim = target_ws.row_dimensions[row_key]
+            target_dim.height = row_dim.height
+            target_dim.hidden = row_dim.hidden
+            target_dim.outlineLevel = row_dim.outlineLevel
+
+        for col_key, col_dim in source_ws.column_dimensions.items():
+            target_dim = target_ws.column_dimensions[col_key]
+            target_dim.width = col_dim.width
+            target_dim.hidden = col_dim.hidden
+            target_dim.outlineLevel = col_dim.outlineLevel
+
+        target_ws.freeze_panes = source_ws.freeze_panes
+        target_ws.sheet_format = copy(source_ws.sheet_format)
+        target_ws.sheet_properties = copy(source_ws.sheet_properties)
+        target_ws.sheet_view.showGridLines = source_ws.sheet_view.showGridLines
+        if source_ws.auto_filter.ref:
+            target_ws.auto_filter.ref = source_ws.auto_filter.ref
+        return target_ws
 
     # ------------------------------------------------------------------ #
     # 合并单元格维护（openpyxl 的 insert/delete_rows/cols 不会同步移动

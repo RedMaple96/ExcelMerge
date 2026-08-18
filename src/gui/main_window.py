@@ -1866,6 +1866,93 @@ class MainWindow(QMainWindow):
         # 合并后只重置当前sheet的差异状态，不重新计算所有sheet（避免阻塞UI）
         # 当前sheet的差异状态会在_compare完成后由_update_current_sheet_diff_status更新
 
+    def _refresh_side_sheet_combo(self, side: str, selected: Optional[str]) -> None:
+        """结构变化后重建指定侧 Sheet 下拉并屏蔽比较信号。"""
+        wb = self.left_wb if side == "left" else self.right_wb
+        combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
+        names = ExcelLoader.get_sheet_names(wb) if wb is not None else []
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(names)
+        index = combo.findText(selected) if selected else -1
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setCurrentIndex(-1)
+        combo.blockSignals(False)
+
+    def _refresh_after_sheet_structure_change(self) -> None:
+        """整表新增/删除后同步底部标签、表格视图与差异结果。"""
+        self.diff_result = None
+        self._current_diff_pos = -1
+        self._update_birds_eye()
+        self._refresh_bottom_bar_sheets()
+        self._refresh_tables()
+        self._run_compare()
+
+    def _mark_side_dirty(self, side: str) -> None:
+        self._dirty[side] = True
+        self._backup_done[side] = False
+
+    def _copy_whole_sheet(self, source_side: str) -> None:
+        """把仅一侧存在的当前 Sheet 整表复制并新增到对侧。"""
+        source = self.left_sheet_data if source_side == "left" else self.right_sheet_data
+        target_side = "right" if source_side == "left" else "left"
+        target_wb = self.left_wb if target_side == "left" else self.right_wb
+        if source is None or target_wb is None:
+            self.update_status("当前不是单侧缺失 Sheet，无法整表复制")
+            return
+        if source.worksheet.title in target_wb.sheetnames:
+            QMessageBox.warning(self, "整表复制失败", "对侧已存在同名工作表")
+            return
+
+        try:
+            target_ws = ExcelMerger.copy_sheet_to_workbook(source, target_wb)
+            target_data = ExcelLoader.extract_sheet_data(target_ws)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "整表复制失败", f"复制整表失败:\n{exc}")
+            return
+
+        if target_side == "left":
+            self.left_sheet_data = target_data
+            self.left_sheet_name = target_data.worksheet.title
+        else:
+            self.right_sheet_data = target_data
+            self.right_sheet_name = target_data.worksheet.title
+        self._refresh_side_sheet_combo(target_side, source.worksheet.title)
+        self._mark_side_dirty(target_side)
+        self._refresh_after_sheet_structure_change()
+        self.update_status(f"已整表复制到{'左' if target_side == 'left' else '右'}侧 - 请保存")
+
+    def _delete_whole_sheet(self, side: str) -> None:
+        """删除当前仅一侧存在的 Sheet，使两侧结构一致。"""
+        wb = self.left_wb if side == "left" else self.right_wb
+        name = self.left_sheet_name if side == "left" else self.right_sheet_name
+        if wb is None or not name or name not in wb.sheetnames:
+            self.update_status("当前不是单侧缺失 Sheet，无法删除整表")
+            return
+        if len(wb.sheetnames) <= 1:
+            QMessageBox.warning(self, "整表删除失败", "工作簿至少需要保留一个工作表")
+            return
+
+        old_index = wb.sheetnames.index(name)
+        worksheet = wb[name]
+        wb.remove(worksheet)
+
+        if side == "left":
+            self.left_sheet_data = None
+        else:
+            self.right_sheet_data = None
+        self._refresh_side_sheet_combo(side, None)
+        remaining_names = ExcelLoader.get_sheet_names(wb)
+        fallback_name = remaining_names[max(old_index - 1, 0)]
+        self._select_sheet_by_name("left", fallback_name)
+        self._select_sheet_by_name("right", fallback_name)
+        self._mark_side_dirty(side)
+        self._refresh_after_sheet_structure_change()
+        side_label = "左" if side == "left" else "右"
+        self.update_status(f"已删除{side_label}侧整表: {name} - 请保存")
+
     def on_context_menu(self, pos) -> None:
         """表格右键菜单：根据触发表格决定“复制到对侧”的文案与方向。
 
@@ -1881,6 +1968,24 @@ class MainWindow(QMainWindow):
         is_left = table is self.left_table
         other_label = "右侧" if is_left else "左侧"
         menu = QMenu(self)
+        missing_side = self.diff_result is not None and self.diff_result.sheet_missing
+        if missing_side:
+            source_side = "left" if self.left_sheet_data is not None else "right"
+            source_label = "左" if source_side == "left" else "右"
+            current_label = "左" if is_left else "右"
+            if source_label == current_label:
+                menu.addAction(
+                    f"复制当前整表到{other_label}（新增）",
+                    self._ctx_copy_whole_sheet,
+                )
+                menu.addAction(
+                    f"删除当前整表（{source_label}侧）",
+                    self._ctx_delete_whole_sheet,
+                )
+            else:
+                menu.addAction(f"从{source_label}侧复制整表（新增）", self._ctx_copy_whole_sheet)
+                menu.addAction(f"删除{source_label}侧整表", self._ctx_delete_whole_sheet)
+            menu.addSeparator()
         menu.addAction(f"复制行到{other_label}（含插入/删除）", self._ctx_copy_row)
         menu.addAction(f"复制列到{other_label}（含插入/删除）", self._ctx_copy_column)
         menu.addAction(f"复制单元格到{other_label}", self._ctx_copy_single_cell)
@@ -1890,6 +1995,24 @@ class MainWindow(QMainWindow):
         menu.addAction("交换左右", self.swap_sides)
         global_pos = table.viewport().mapToGlobal(pos)
         menu.exec(global_pos)
+
+    def _ctx_copy_whole_sheet(self) -> None:
+        source_side = "left" if self.left_sheet_data is not None else "right"
+        self._copy_whole_sheet(source_side)
+
+    def _ctx_delete_whole_sheet(self) -> None:
+        source_side = "left" if self.left_sheet_data is not None else "right"
+        side_label = "左" if source_side == "left" else "右"
+        name = self.left_sheet_name if source_side == "left" else self.right_sheet_name
+        button = QMessageBox.question(
+            self,
+            "删除整表",
+            f"确定删除{side_label}侧工作表「{name}」？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if button == QMessageBox.Yes:
+            self._delete_whole_sheet(source_side)
 
     def _resolve_pair_for_row(self, row: int, quiet: bool = False):
         """根据 _ctx_table 与指定行解析对齐行，返回 (source, src_idx, target, tgt_idx, side, mode)。

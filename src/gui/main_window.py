@@ -51,7 +51,7 @@ from openpyxl.utils import get_column_letter
 
 from src import __version__ as APP_VERSION
 from src.core.chardiff import char_diff_ranges
-from src.core.comparator import ColPair, DiffResult, ExcelComparator
+from src.core.comparator import ColPair, DiffResult, ExcelComparator, RowPair
 from src.core.excel_loader import ExcelLoader, SheetData
 from src.core.merger import ExcelMerger
 from src.gui.bottom_bar import BottomBar
@@ -808,6 +808,8 @@ class MainWindow(QMainWindow):
         if not self._load_sheet_data(side, name):
             return
 
+        self._sync_other_sheet_selection(side, name)
+
         # 切换 Sheet 时清除旧的差异结果，避免显示错位的对齐行
         self.diff_result = None
         self._update_birds_eye()
@@ -846,6 +848,38 @@ class MainWindow(QMainWindow):
             self.right_sheet_name = name
         return True
 
+    def _select_sheet_by_name(self, side: str, name: str) -> bool:
+        """按名称选择指定侧 Sheet；该侧不存在时清空旧数据避免错位比较。"""
+        wb = self.left_wb if side == "left" else self.right_wb
+        combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
+
+        if wb is not None and name in ExcelLoader.get_sheet_names(wb):
+            combo.blockSignals(True)
+            index = combo.findText(name)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+            return self._load_sheet_data(side, name)
+
+        combo.blockSignals(True)
+        combo.setCurrentIndex(-1)
+        combo.blockSignals(False)
+        if side == "left":
+            self.left_sheet_data = None
+            self.left_sheet_name = name
+        else:
+            self.right_sheet_data = None
+            self.right_sheet_name = name
+        return True
+
+    def _sync_other_sheet_selection(self, changed_side: str, name: str) -> None:
+        """切换一侧 Sheet 后，将另一侧同步到同名 Sheet（不存在则显示为空）。"""
+        other_side = "right" if changed_side == "left" else "left"
+        other_wb = self.right_wb if other_side == "right" else self.left_wb
+        if other_wb is None:
+            return
+        self._select_sheet_by_name(other_side, name)
+
     def _switch_to_sheet(self, name: str) -> None:
         """从底部标签栏切换两侧到同一 Sheet（屏蔽下拉信号避免重复比较）。"""
         if not self._check_unsaved_before_switch():
@@ -857,14 +891,8 @@ class MainWindow(QMainWindow):
         self.left_sheet_combo.blockSignals(True)
         self.right_sheet_combo.blockSignals(True)
         try:
-            li = self.left_sheet_combo.findText(name)
-            if li >= 0 and self.left_wb is not None:
-                self.left_sheet_combo.setCurrentIndex(li)
-                self._load_sheet_data("left", name)
-            ri = self.right_sheet_combo.findText(name)
-            if ri >= 0 and self.right_wb is not None:
-                self.right_sheet_combo.setCurrentIndex(ri)
-                self._load_sheet_data("right", name)
+            self._select_sheet_by_name("left", name)
+            self._select_sheet_by_name("right", name)
         finally:
             self.left_sheet_combo.blockSignals(False)
             self.right_sheet_combo.blockSignals(False)
@@ -1046,17 +1074,28 @@ class MainWindow(QMainWindow):
         比较完成后由 worker 信号驱动 _on_diff_ready / _on_compare_finished
         更新表格与状态。若已有比较在跑则跳过本次请求。
         """
-        if not (self.left_sheet_data and self.right_sheet_data):
+        if self.left_sheet_data is None and self.right_sheet_data is None:
             self.diff_result = None
             self._current_diff_pos = -1
             self._update_stat_labels()
             self._render_diffs()
             return
 
-        # 防止重叠：已有比较线程在跑则跳过
-        if self._compare_worker is not None and self._compare_worker.isRunning():
+        if self.left_sheet_data is None or self.right_sheet_data is None:
+            if self._compare_worker is not None:
+                self._compare_worker = None
+                self._set_compare_actions_enabled(True)
+                self.progress_bar.hide()
+            self.diff_result = self._build_missing_sheet_diff()
+            self._current_diff_pos = -1
+            self._refresh_tables()
+            self._update_stat_labels()
+            self._render_diffs()
+            self._update_current_sheet_diff_status(self.diff_result)
             return
 
+        # 若旧比较仍在运行，则让新请求并发启动；旧结果会通过 sender 校验丢弃。
+        # 这里不能跳过新请求，否则快速切换 Sheet 后界面会停留在旧结果。
         self._set_compare_actions_enabled(False)
         self.update_status("比较中...")
         self.progress_bar.setRange(0, 100)
@@ -1076,6 +1115,47 @@ class MainWindow(QMainWindow):
         self._compare_worker.finished.connect(self._compare_worker.deleteLater)
         self._compare_worker.start()
 
+    def _build_missing_sheet_diff(self) -> DiffResult:
+        """构建单侧 Sheet 缺失时的整表差异结果。"""
+        present_left = self.left_sheet_data is not None
+        sheet_data = self.left_sheet_data if present_left else self.right_sheet_data
+        row_status = "left_only" if present_left else "right_only"
+        other_status = "right_only" if present_left else "left_only"
+
+        aligned_rows = [
+            RowPair(
+                left_row=index if present_left else None,
+                right_row=None if present_left else index,
+                status=row_status,
+                diff_cells=[],
+            )
+            for index in range(len(sheet_data.values))
+        ]
+        aligned_cols = [
+            ColPair(
+                left_col=index if present_left else None,
+                right_col=None if present_left else index,
+                status=row_status,
+                label=label,
+            )
+            for index, label in enumerate(sheet_data.header_labels)
+        ]
+        stats = {
+            "same": 0,
+            "different": 0,
+            row_status: len(aligned_rows),
+            other_status: 0,
+        }
+        return DiffResult(
+            aligned_rows=aligned_rows,
+            aligned_cols=aligned_cols,
+            diff_row_indices=list(range(len(aligned_rows))),
+            diff_cell_set=set(),
+            stats=stats,
+            max_col=len(aligned_cols),
+            sheet_missing=True,
+        )
+
     def _set_compare_actions_enabled(self, enabled: bool) -> None:
         """比较期间禁用/恢复会触发比较的相关动作，避免重入。"""
         for act in (
@@ -1089,6 +1169,8 @@ class MainWindow(QMainWindow):
 
     def _on_diff_ready(self, result: DiffResult) -> None:
         """比较结果就绪：保存结果、重置游标、刷新表格与差异渲染。"""
+        if self.sender() is not self._compare_worker:
+            return
         self.diff_result = result
         self._current_diff_pos = -1
         # 重新渲染为对齐行布局，再叠加差异标识
@@ -1100,6 +1182,8 @@ class MainWindow(QMainWindow):
 
     def _on_compare_progress(self, cur: int, total: int) -> None:
         """更新状态栏进度条。"""
+        if self.sender() is not self._compare_worker:
+            return
         if total <= 0:
             self.progress_bar.setValue(100)
             return
@@ -1107,6 +1191,8 @@ class MainWindow(QMainWindow):
 
     def _on_compare_finished(self) -> None:
         """比较结束：恢复动作可用、隐藏进度条、更新状态。"""
+        if self.sender() is not self._compare_worker:
+            return
         self._set_compare_actions_enabled(True)
         self.progress_bar.hide()
         self._compare_worker = None
@@ -1323,7 +1409,9 @@ class MainWindow(QMainWindow):
 
     def _update_stat_labels(self) -> None:
         """更新状态栏的行/差异数，按类型分别显示。"""
-        if self.diff_result:
+        if self.diff_result and self.diff_result.sheet_missing:
+            self.diff_label.setText("差异: 1 (Sheet缺失)")
+        elif self.diff_result:
             s = self.diff_result.stats
             self.diff_label.setText(
                 f"差异: {s['different'] + s['left_only'] + s['right_only']}"
@@ -1569,27 +1657,21 @@ class MainWindow(QMainWindow):
         self.update_status("已交换左右两侧")
 
     def _swap_combos(self) -> None:
-        """交换左右 Sheet 下拉的项目与当前选择（屏蔽信号）。"""
-        lc, rc = self.left_sheet_combo, self.right_sheet_combo
-        lc.blockSignals(True)
-        rc.blockSignals(True)
-        try:
-            left_items = [lc.itemText(i) for i in range(lc.count())]
-            left_idx = lc.currentIndex()
-            right_items = [rc.itemText(i) for i in range(rc.count())]
-            right_idx = rc.currentIndex()
+        """交换左右 Sheet 下拉项目，并按当前 Sheet 名称恢复选择。"""
+        for side in ("left", "right"):
+            wb = self.left_wb if side == "left" else self.right_wb
+            combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
+            current_name = (
+                self.left_sheet_name if side == "left" else self.right_sheet_name
+            )
+            combo.blockSignals(True)
+            combo.clear()
+            if wb is not None:
+                combo.addItems(ExcelLoader.get_sheet_names(wb))
+                index = combo.findText(current_name)
+                combo.setCurrentIndex(index)
+            combo.blockSignals(False)
 
-            lc.clear()
-            lc.addItems(right_items)
-            if right_items:
-                lc.setCurrentIndex(min(right_idx, len(right_items) - 1))
-            rc.clear()
-            rc.addItems(left_items)
-            if left_items:
-                rc.setCurrentIndex(min(left_idx, len(left_items) - 1))
-        finally:
-            lc.blockSignals(False)
-            rc.blockSignals(False)
 
     # ------------------------------------------------------------------ #
     # 差异导航（Task 6 实装）
@@ -1689,6 +1771,9 @@ class MainWindow(QMainWindow):
         if not self.diff_result:
             self.update_status("无差异结果，无法合并")
             return
+        if not (self.left_sheet_data and self.right_sheet_data):
+            self.update_status("当前 Sheet 仅一侧存在，无法合并")
+            return
         btn = QMessageBox.question(
             self, "右覆盖", "将以右侧为准覆盖左侧差异，继续？"
         )
@@ -1709,6 +1794,9 @@ class MainWindow(QMainWindow):
         if not self.diff_result:
             self.update_status("无差异结果，无法合并")
             return
+        if not (self.left_sheet_data and self.right_sheet_data):
+            self.update_status("当前 Sheet 仅一侧存在，无法合并")
+            return
         btn = QMessageBox.question(
             self, "左覆盖", "将以左侧为准覆盖右侧差异，继续？"
         )
@@ -1728,6 +1816,9 @@ class MainWindow(QMainWindow):
         """追加差异行：仅把右侧独占行追加到左侧末尾。"""
         if not self.diff_result:
             self.update_status("无差异结果，无法合并")
+            return
+        if not (self.left_sheet_data and self.right_sheet_data):
+            self.update_status("当前 Sheet 仅一侧存在，无法合并")
             return
         btn = QMessageBox.question(
             self, "追加差异行", "将把右侧独占行追加到左侧末尾，继续？"

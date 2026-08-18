@@ -72,6 +72,7 @@ class DiffResult:
     - diff_cell_set: (aligned_row_index, aligned_col_index) 差异单元格集合
     - stats: {"same": int, "different": int, "left_only": int, "right_only": int}
     - max_col: 用于显示的最大列数（= len(aligned_cols)）
+    - sheet_missing: 表示当前比较的 Sheet 仅存在于一侧（整表级差异）
     """
 
     aligned_rows: List[RowPair]
@@ -80,6 +81,7 @@ class DiffResult:
     diff_cell_set: Set[Tuple[int, int]]
     stats: dict
     max_col: int
+    sheet_missing: bool = False
 
     def has_differences(self) -> bool:
         """是否真的存在任何差异（行差异 + 列结构差异）。
@@ -98,7 +100,7 @@ class DiffResult:
             cp.status in ("left_only", "right_only")
             for cp in self.aligned_cols
         )
-        return row_diff or col_diff
+        return row_diff or col_diff or self.sheet_missing
 
 
 class ExcelComparator:

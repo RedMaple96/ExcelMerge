@@ -2671,12 +2671,14 @@ class MainWindow(QMainWindow):
             ideal_w = max(ideal_w, doc.idealWidth())
             doc.setTextWidth(doc.idealWidth())
             no_wrap_h = max(
-                no_wrap_h, int(math.ceil(doc.size().height())) + 4
+                no_wrap_h, int(math.ceil(doc.size().height())) + 12
             )
 
         # 已完整显示则无需调整（不进入展开状态，也就不需要恢复）
+        # 余量需覆盖默认样式绘制（super().paint）的左右文字边距，过小会被 elide 成 "..."
+        fit_margin = 24
         fits = all(
-            table.columnWidth(col) >= ideal_w + 10
+            table.columnWidth(col) >= ideal_w + fit_margin
             and table.rowHeight(row) >= no_wrap_h
             for table in (self.left_table, self.right_table)
         )
@@ -2685,10 +2687,10 @@ class MainWindow(QMainWindow):
             return
 
         max_col_w = int(self.width() * 0.8)
-        if ideal_w + 10 <= max_col_w:
+        if ideal_w + fit_margin <= max_col_w:
             # 只加宽列即可完整显示，无需折行
             for table in (self.left_table, self.right_table):
-                table.setColumnWidth(col, ideal_w + 10)
+                table.setColumnWidth(col, ideal_w + fit_margin)
                 table.setRowHeight(row, max(table.rowHeight(row), no_wrap_h))
                 item = table.item(row, col)
                 if item is not None:
@@ -2711,7 +2713,7 @@ class MainWindow(QMainWindow):
                     continue
                 doc.setTextWidth(max(1, actual_w - 4))
                 wrap_heights.append(
-                    int(math.ceil(doc.size().height())) + 4
+                    int(math.ceil(doc.size().height())) + 12
                 )
             needed_h = max(wrap_heights) if wrap_heights else no_wrap_h
             for table in (self.left_table, self.right_table):

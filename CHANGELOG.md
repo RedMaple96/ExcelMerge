@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-08-18
+
+### Fixed
+
+- 修复底部栏 Sheet 快速切换列表首次点击切换失败、再点箭头误触右键菜单的问题。
+- 修复双击单元格自适应后内容末尾被省略号截断的问题，加大列宽与行高边距。
+- 修复 diff 高亮代理的文本换行显示问题。
+
+### Changed
+
+- Sheet 快速切换列表去除复选框，当前激活项改为加粗标识。
+- 授权模式重构为在线激活。
+
+### Added
+
+- 新增整表复制/删除功能，优化底部标签右键菜单。
+- 新增 Sheet 缺失（仅一侧存在）比较支持。
+
 ## [1.0.2] - 2026-08-14
 
 ### Fixed
@@ -39,3 +57,4 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 [0.1.0]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v0.1.0
 [1.0.2]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.2
+[1.0.3]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.3

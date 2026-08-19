@@ -41,8 +41,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
     QStyle,
-    QTableWidget,
     QTableWidgetItem,
+    QTableWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -64,6 +64,7 @@ from src.gui.diff_highlight_delegate import (
     DiffHighlightDelegate,
     escape_segment,
 )
+from src.gui.diff_table import DiffTableView
 from src.gui.themes import is_dark_mode
 from src.gui.workers import (
     CompareWorker,
@@ -214,7 +215,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(header)
 
         # 表格
-        table = QTableWidget()
+        table = DiffTableView()
         layout.addWidget(table, 1)
 
         parent_layout.addWidget(panel, 1)
@@ -1017,13 +1018,14 @@ class MainWindow(QMainWindow):
         - row_indices 中 None 表示该显示行为虚拟空行（对应侧无此行）。
         - aligned_cols 描述列对齐：same 列两侧都有值；left_only 列右侧为虚拟空列；
           right_only 列左侧为虚拟空列。
-        - 虚拟空行/空列创建占位 QTableWidgetItem（文本为空，标记 __virtual__），
+        - 虚拟空行/空列置空文本并标记 __virtual__（Model/View 直接写模型），
           以便后续 _render_diffs 可对其着色。
         - 单元格默认显示文本值（缓存计算值）；当两侧文本值一致但公式不同时
           显示公式，以便直观呈现"同值异式"差异。无缓存数据时退化为显示公式。
         """
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
+        table.beginPopulate()
         try:
             # 表格重建后，之前的双击自适应状态与涂色跟踪随之失效
             self._fit_cells.clear()
@@ -1051,10 +1053,8 @@ class MainWindow(QMainWindow):
                         col_idx = cp.right_col
 
                     if col_idx is None:
-                        # 虚拟空列：该侧无此列
-                        item = QTableWidgetItem("")
-                        item.setData(Qt.ItemDataRole.UserRole, "__virtual__")
-                        table.setItem(r, c, item)
+                        # 虚拟空列：该侧无此列（Model/View：直接写文本+虚拟标记）
+                        table.setCellText(r, c, "", virtual=True)
                         continue
 
                     # 虚拟空行 或 有数据
@@ -1068,7 +1068,7 @@ class MainWindow(QMainWindow):
                         elif not formula and not cached:
                             # 本侧为空：无论对侧如何，显示文本均为 ""，
                             # 跳过对侧取值（结果与原逻辑完全一致）
-                            table.setItem(r, c, QTableWidgetItem(""))
+                            table.setCellText(r, c, "")
                             continue
                         else:
                             # 默认显示文本值；same 列且两侧文本值一致、
@@ -1098,15 +1098,14 @@ class MainWindow(QMainWindow):
                                     and formula != other_formula
                                 ):
                                     text = formula
-                        table.setItem(r, c, QTableWidgetItem(text))
+                        table.setCellText(r, c, text)
                     else:
                         # 虚拟空行
-                        item = QTableWidgetItem("")
-                        item.setData(Qt.ItemDataRole.UserRole, "__virtual__")
-                        table.setItem(r, c, item)
+                        table.setCellText(r, c, "", virtual=True)
 
             table.verticalHeader().setVisible(self.show_row_numbers)
         finally:
+            table.endPopulate()
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
 
@@ -2790,7 +2789,7 @@ class MainWindow(QMainWindow):
         保证并排视图继续对齐。
         """
         table = self.sender()
-        if not isinstance(table, QTableWidget):
+        if not isinstance(table, DiffTableView):
             return
         if row < 0 or col < 0:
             return

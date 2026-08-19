@@ -115,6 +115,7 @@ class ExcelComparator:
         right: SheetData,
         key_cols: Optional[List[int]] = None,
         ignore_cols: Optional[List[int]] = None,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
     ) -> DiffResult:
         """比较两个 SheetData。
 
@@ -128,6 +129,8 @@ class ExcelComparator:
         - 公式按字面量比较（values 中已是字符串）；若 SheetData 提供
           cached_values（data_only=True 缓存计算值），公式相同但计算值不同
           也判定为差异。
+        - progress_cb: 可选回调 (当前已对齐行数, 总行数)，每处理约 200 行
+          触发一次，用于 UI 进度反馈；不影响比较逻辑与结果。
         """
         if key_cols is None:
             key_cols = []
@@ -151,6 +154,11 @@ class ExcelComparator:
         diff_cell_set: Set[Tuple[int, int]] = set()
         stats: dict = {"same": 0, "different": 0, "left_only": 0, "right_only": 0}
 
+        # 进度反馈：包装 append_pair 计数，每 200 行回调一次。
+        # 结果与不带进度回调时完全一致（仅额外发射进度）。
+        total_rows = len(left.values) + len(right.values)
+        progress_state = [0]  # 用列表承载 nonlocal 计数
+
         def append_pair(
             l_idx: Optional[int],
             r_idx: Optional[int],
@@ -158,6 +166,13 @@ class ExcelComparator:
             diff_cells: Optional[List[int]] = None,
         ) -> None:
             """追加一个对齐行，并同步更新差异索引/统计/差异单元格集合。"""
+            if progress_cb is not None:
+                progress_state[0] += 1
+                if progress_state[0] % 200 == 0:
+                    try:
+                        progress_cb(progress_state[0], total_rows)
+                    except Exception:  # noqa: BLE001
+                        pass
             aligned_idx = len(aligned_rows)
             aligned_rows.append(
                 RowPair(
@@ -246,6 +261,14 @@ class ExcelComparator:
             positional_matches = sum(
                 1 for c in range(n_left) if left_names[c] == right_names[c]
             )
+            # 快速路径：逐位置全部匹配时，LCS/二分图匹配数不可能更高，
+            # 且 positional 优先级最高，可直接返回（结果与完整评估完全一致）
+            if positional_matches == n_left:
+                return [
+                    ColPair(left_col=c, right_col=c, status="same",
+                            label=left_names[c])
+                    for c in range(n_left)
+                ]
             raw = ExcelComparator._lcs_backtrace(left_names, right_names)
             lcs_matches = sum(1 for item in raw if item[0] == "match")
             bip_pairs = ExcelComparator._match_columns_bipartite(
@@ -474,18 +497,27 @@ class ExcelComparator:
         n_left = len(left_sigs)
         n_right = len(right_sigs)
 
-        # 性能阈值：超过该大小时不使用标准LCS DP，避免内存爆炸
+        # 性能阈值：超过该大小时不使用标准LCS DP（避免 O(n*m) 内存/时间爆炸），
+        # 改用锚点对齐：全局唯一签名先锚定（无窗口距离限制），锚点间隙内
+        # 若仍在阈值内则继续用 DP 精确对齐，否则退化为位置配对。
         _LCS_MAX_SIZE = 500
         if n_left > _LCS_MAX_SIZE or n_right > _LCS_MAX_SIZE:
-            return ExcelComparator._greedy_align(left_sigs, right_sigs)
+            return ExcelComparator._anchor_align(left_sigs, right_sigs)
 
         dp: List[List[int]] = [[0] * (n_right + 1) for _ in range(n_left + 1)]
+        # 内层循环局部变量绑定：减少 dp/left_sigs/right_sigs 的重复全局/属性查找，
+        # 计算结果与原实现逐位一致
         for i in range(1, n_left + 1):
+            li = left_sigs[i - 1]
+            row = dp[i]
+            prev = dp[i - 1]
             for j in range(1, n_right + 1):
-                if left_sigs[i - 1] == right_sigs[j - 1]:
-                    dp[i][j] = dp[i - 1][j - 1] + 1
+                if li == right_sigs[j - 1]:
+                    row[j] = prev[j - 1] + 1
                 else:
-                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+                    a = prev[j]
+                    b = row[j - 1]
+                    row[j] = a if a >= b else b
 
         raw: List[Tuple] = []
         i, j = n_left, n_right
@@ -508,6 +540,120 @@ class ExcelComparator:
             j -= 1
         raw.reverse()
         return raw
+
+    @staticmethod
+    def _anchor_align(left_sigs: List, right_sigs: List) -> List[Tuple]:
+        """锚点对齐：大序列（超过 LCS 阈值）时替代贪心的对齐算法。
+
+        步骤：
+        1. 找两侧均唯一的签名作为锚点（哈希索引，无窗口距离限制，
+           可匹配任意距离移动的行）；
+        2. 对锚点按右侧索引做最长递增子序列（LIS）过滤，丢弃破坏
+           保序性的锚点，保证输出与原行顺序一致；
+        3. 锚点间隙内：两侧均 ≤ _LCS_MAX_SIZE 时用 LCS DP 精确对齐，
+           否则退化为位置配对（间隙内等位匹配，其余标 only）。
+
+        输出格式与 _lcs_backtrace / _greedy_align 完全一致。
+        """
+        n_left = len(left_sigs)
+        n_right = len(right_sigs)
+
+        # 1. 全局唯一签名锚点
+        left_count: dict = {}
+        for s in left_sigs:
+            left_count[s] = left_count.get(s, 0) + 1
+        right_count: dict = {}
+        right_pos: dict = {}
+        for j, s in enumerate(right_sigs):
+            right_count[s] = right_count.get(s, 0) + 1
+            if left_count.get(s) == 1 and right_count[s] == 1:
+                right_pos[s] = j
+        anchors: List[Tuple[int, int]] = []
+        for i, s in enumerate(left_sigs):
+            j = right_pos.get(s)
+            if j is not None:
+                anchors.append((i, j))
+
+        # 2. LIS 过滤（按右侧索引递增），保留保序锚点链
+        if anchors:
+            anchors.sort()
+            tails: List[int] = []          # LIS 尾部值（右侧索引）
+            tail_k: List[int] = []         # 对应 anchors 下标
+            prev_k: List[int] = [-1] * len(anchors)
+            for k, (_li, ri) in enumerate(anchors):
+                p = bisect.bisect_left(tails, ri)
+                if p == len(tails):
+                    tails.append(ri)
+                    tail_k.append(k)
+                else:
+                    tails[p] = ri
+                    tail_k[p] = k
+                prev_k[k] = tail_k[p - 1] if p > 0 else -1
+            chain: List[Tuple[int, int]] = []
+            k = tail_k[-1]
+            while k != -1:
+                chain.append(anchors[k])
+                k = prev_k[k]
+            chain.reverse()
+            anchors = chain
+
+        # 3. 逐间隙对齐并按顺序拼接输出
+        out: List[Tuple] = []
+        prev_l = -1
+        prev_r = -1
+        for li, ri in anchors + [(n_left, n_right)]:
+            ExcelComparator._anchor_fill_gap(
+                left_sigs, right_sigs, prev_l + 1, li, prev_r + 1, ri, out
+            )
+            if li < n_left:
+                out.append(("match", li, ri))
+            prev_l, prev_r = li, ri
+        return out
+
+    @staticmethod
+    def _anchor_fill_gap(
+        left_sigs: List,
+        right_sigs: List,
+        l0: int,
+        l1: int,
+        r0: int,
+        r1: int,
+        out: List[Tuple],
+    ) -> None:
+        """锚点间隙对齐：小间隙用 LCS DP，大间隙退化位置配对。"""
+        nl = l1 - l0
+        nr = r1 - r0
+        if nl <= 0 and nr <= 0:
+            return
+        if nl <= 0:
+            out.extend(("right", r0 + k) for k in range(nr))
+            return
+        if nr <= 0:
+            out.extend(("left", l0 + k) for k in range(nl))
+            return
+        _LCS_MAX_SIZE = 500
+        if nl <= _LCS_MAX_SIZE and nr <= _LCS_MAX_SIZE:
+            sub = ExcelComparator._lcs_backtrace(
+                left_sigs[l0:l1], right_sigs[r0:r1]
+            )
+            for item in sub:
+                if item[0] == "match":
+                    out.append(("match", l0 + item[1], r0 + item[2]))
+                elif item[0] == "left":
+                    out.append(("left", l0 + item[1]))
+                else:
+                    out.append(("right", r0 + item[1]))
+            return
+        # 大间隙且无锚点：位置配对（等位且签名相同才 match，其余标 only）
+        common = min(nl, nr)
+        for k in range(common):
+            if left_sigs[l0 + k] == right_sigs[r0 + k]:
+                out.append(("match", l0 + k, r0 + k))
+            else:
+                out.append(("left", l0 + k))
+                out.append(("right", r0 + k))
+        out.extend(("left", l0 + k) for k in range(common, nl))
+        out.extend(("right", r0 + k) for k in range(common, nr))
 
     @staticmethod
     def _greedy_align(left_sigs: List, right_sigs: List) -> List[Tuple]:
@@ -585,12 +731,14 @@ class ExcelComparator:
         """
         n_left = len(left_values)
         n_right = len(right_values)
+        # 预计算列比较规格：过滤 ignore/非 same 列，逐行比较免重复过滤
+        cmp_spec = ExcelComparator._build_compare_spec(aligned_cols, ignore_set)
 
         # 等长快速路径
         if n_left == n_right:
             for i in range(n_left):
-                equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                    left_values[i], right_values[i], aligned_cols, ignore_set,
+                equal, diff_cells = ExcelComparator._rows_equal_fast(
+                    left_values[i], right_values[i], cmp_spec,
                     left_cached[i] if left_cached else None,
                     right_cached[i] if right_cached else None,
                 )
@@ -616,8 +764,8 @@ class ExcelComparator:
             if raw[k][0] == "match":
                 _, li, ri = raw[k]
                 # 签名匹配后仍需验证实际值（公式归一化可能导致签名相同但值不同）
-                equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                    left_values[li], right_values[ri], aligned_cols, ignore_set,
+                equal, diff_cells = ExcelComparator._rows_equal_fast(
+                    left_values[li], right_values[ri], cmp_spec,
                     left_cached[li] if left_cached else None,
                     right_cached[ri] if right_cached else None,
                 )
@@ -639,8 +787,8 @@ class ExcelComparator:
                 for m in range(common):
                     li = left_block[m]
                     ri = right_block[m]
-                    equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                        left_values[li], right_values[ri], aligned_cols, ignore_set,
+                    equal, diff_cells = ExcelComparator._rows_equal_fast(
+                        left_values[li], right_values[ri], cmp_spec,
                         left_cached[li] if left_cached else None,
                         right_cached[ri] if right_cached else None,
                     )
@@ -725,6 +873,7 @@ class ExcelComparator:
             right_by_pos[count].append(j)
         for v in right_by_pos.values():
             v.sort()
+        cmp_spec = ExcelComparator._build_compare_spec(aligned_cols, ignore_set)
 
         for idx, (li, ri) in enumerate(pairs):
             for j in right_by_pos.get(idx, []):
@@ -732,8 +881,8 @@ class ExcelComparator:
             if ri is None:
                 append_pair(li, None, "left_only")
             else:
-                equal, diff_cells = ExcelComparator._rows_equal_aligned(
-                    left_values[li], right_values[ri], aligned_cols, ignore_set,
+                equal, diff_cells = ExcelComparator._rows_equal_fast(
+                    left_values[li], right_values[ri], cmp_spec,
                     left_cached[li] if left_cached else None,
                     right_cached[ri] if right_cached else None,
                 )
@@ -784,24 +933,40 @@ class ExcelComparator:
 
         返回 (是否全等, 差异列的 aligned_col 索引列表)。
         """
+        spec = ExcelComparator._build_compare_spec(aligned_cols, ignore_set)
+        return ExcelComparator._rows_equal_fast(
+            left_row, right_row, spec, left_cached_row, right_cached_row
+        )
+
+    @staticmethod
+    def _build_compare_spec(
+        aligned_cols: List[ColPair], ignore_set: Set[int]
+    ) -> List[Tuple[int, int, int]]:
+        """预计算参与行比较的列规格：(aligned_idx, left_col, right_col)。
+
+        过滤掉 ignore 列与非 same 列后仅剩必要元组，供 _rows_equal_fast
+        每行直接迭代，避免逐行重复做过滤与 ColPair 属性访问。
+        """
+        return [
+            (idx, cp.left_col, cp.right_col)
+            for idx, cp in enumerate(aligned_cols)
+            if idx not in ignore_set and cp.status == "same"
+        ]
+
+    @staticmethod
+    def _rows_equal_fast(
+        left_row: List[str],
+        right_row: List[str],
+        spec: List[Tuple[int, int, int]],
+        left_cached_row: Optional[List[str]] = None,
+        right_cached_row: Optional[List[str]] = None,
+    ) -> Tuple[bool, List[int]]:
+        """_rows_equal_aligned 的快速版：直接迭代预计算列规格，结果完全一致。"""
         has_cached = left_cached_row is not None and right_cached_row is not None
         diff_cells: List[int] = []
-        for idx, cp in enumerate(aligned_cols):
-            if idx in ignore_set:
-                continue
-            if cp.status != "same":
-                # 独占列不参与 same/different 判定
-                continue
-            lv = (
-                left_row[cp.left_col]
-                if cp.left_col is not None and cp.left_col < len(left_row)
-                else ""
-            )
-            rv = (
-                right_row[cp.right_col]
-                if cp.right_col is not None and cp.right_col < len(right_row)
-                else ""
-            )
+        for idx, l_col, r_col in spec:
+            lv = left_row[l_col] if l_col is not None and l_col < len(left_row) else ""
+            rv = right_row[r_col] if r_col is not None and r_col < len(right_row) else ""
             if lv != rv:
                 diff_cells.append(idx)
                 continue
@@ -809,13 +974,13 @@ class ExcelComparator:
             # （检测"公式相同但计算结果不同"的差异）
             if has_cached:
                 lcv = (
-                    left_cached_row[cp.left_col]
-                    if cp.left_col is not None and cp.left_col < len(left_cached_row)
+                    left_cached_row[l_col]
+                    if l_col is not None and l_col < len(left_cached_row)
                     else ""
                 )
                 rcv = (
-                    right_cached_row[cp.right_col]
-                    if cp.right_col is not None and cp.right_col < len(right_cached_row)
+                    right_cached_row[r_col]
+                    if r_col is not None and r_col < len(right_cached_row)
                     else ""
                 )
                 if lcv != rcv:

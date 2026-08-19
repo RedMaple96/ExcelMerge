@@ -261,17 +261,20 @@ class ExcelMerger:
             and p.left_row is not None
             and p.right_row is not None
         ]
+        # 目标侧已见列数前缀表，避免每个插入点重复扫描 O(n²)
+        tgt_seen_prefix = []
+        seen = 0
+        for c in aligned_cols:
+            tgt_seen_prefix.append(seen)
+            if (c.left_col if src_is_right else c.right_col) is not None:
+                seen += 1
         for aligned_idx in range(len(aligned_cols) - 1, -1, -1):
             cp = aligned_cols[aligned_idx]
             src_col = cp.right_col if src_is_right else cp.left_col
             tgt_col = cp.left_col if src_is_right else cp.right_col
             if src_col is None or tgt_col is not None:
                 continue
-            insert_idx = sum(
-                1
-                for c in aligned_cols[:aligned_idx]
-                if (c.left_col if src_is_right else c.right_col) is not None
-            )
+            insert_idx = tgt_seen_prefix[aligned_idx]
             ExcelMerger.insert_column_to_other(
                 source, src_col, target, insert_idx, 0, row_mapping
             )
@@ -322,18 +325,14 @@ class ExcelMerger:
 
         # 3. right_only 行按位置插入（此时左侧每个对齐列都有实际列，
         #    物理列号 = aligned_idx）
-        inserts: List[Tuple[int, int]] = [
-            (
-                sum(
-                    1
-                    for p in diff_result.aligned_rows[:i]
-                    if p.left_row is not None
-                ),
-                pair.right_row,
-            )
-            for i, pair in enumerate(diff_result.aligned_rows)
-            if pair.status == "right_only"
-        ]
+        # 单遍累计左侧已见行数，替代对每个插入点重复前缀求和的 O(n²)
+        inserts: List[Tuple[int, int]] = []
+        seen_left_rows = 0
+        for pair in diff_result.aligned_rows:
+            if pair.status == "right_only":
+                inserts.append((seen_left_rows, pair.right_row))
+            if pair.left_row is not None:
+                seen_left_rows += 1
         col_mapping = [
             (cp.right_col, idx)
             for idx, cp in enumerate(aligned_cols)
@@ -391,18 +390,14 @@ class ExcelMerger:
         )
 
         # 3. left_only 行按位置插入
-        inserts: List[Tuple[int, int]] = [
-            (
-                sum(
-                    1
-                    for p in diff_result.aligned_rows[:i]
-                    if p.right_row is not None
-                ),
-                pair.left_row,
-            )
-            for i, pair in enumerate(diff_result.aligned_rows)
-            if pair.status == "left_only"
-        ]
+        # 单遍累计右侧已见行数，替代 O(n²) 前缀求和
+        inserts: List[Tuple[int, int]] = []
+        seen_right_rows = 0
+        for pair in diff_result.aligned_rows:
+            if pair.status == "left_only":
+                inserts.append((seen_right_rows, pair.left_row))
+            if pair.right_row is not None:
+                seen_right_rows += 1
         col_mapping = [
             (cp.left_col, idx)
             for idx, cp in enumerate(aligned_cols)

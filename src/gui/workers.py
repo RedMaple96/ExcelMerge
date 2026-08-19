@@ -59,7 +59,8 @@ class CompareWorker(QThread):
             # 注意：大文件优化（跳过空行）位于 extract_sheet_data，
             # 此处不得通过跳行来加速，否则会破坏行对齐。
             result = ExcelComparator.compare_sheets(
-                self.left, self.right, self.key_cols, self.ignore_cols
+                self.left, self.right, self.key_cols, self.ignore_cols,
+                progress_cb=lambda cur, tot: self.progress.emit(cur, tot),
             )
             # 比较快，这里一次性发完进度
             self.progress.emit(total, total)
@@ -69,6 +70,101 @@ class CompareWorker(QThread):
             self.log.emit("error", f"比较失败: {e}")
         finally:
             self.finished_ok.emit()
+
+
+class LoadWorkbookWorker(QThread):
+    """工作簿后台加载线程。
+
+    将 openpyxl 的文件解析（含 data_only 缓存副本）移出 UI 主线程，
+    避免大文件打开时界面冻结。功能结果与同步加载完全一致：
+    加载期间调用方应禁用主窗口，完成后在主线程信号回调中继续原流程。
+
+    信号：
+    - loaded(object, object): (wb, wb_cached) 加载成功（wb_cached 可能为 None）
+    - failed(str): 加载失败的错误信息
+    """
+
+    loaded = Signal(object, object)
+    failed = Signal(str)
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.path = path
+
+    def run(self) -> None:  # noqa: D401
+        try:
+            wb = ExcelLoader.load_workbook(self.path)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
+            return
+        wb_cached = None
+        try:
+            # 仅当含公式时才加载 data_only 副本（与同步路径判断一致）
+            if ExcelLoader.has_formula_cells(wb):
+                wb_cached = ExcelLoader.load_workbook_cached(self.path)
+        except Exception:  # noqa: BLE001
+            wb_cached = None
+        self.loaded.emit(wb, wb_cached)
+
+
+class SaveWorker(QThread):
+    """保存后台线程：执行 save_workbook + 完整性校验（重新加载验证）。
+
+    将大文件保存的重 IO 移出 UI 主线程；备份（文件拷贝）较快由调用方
+    同步完成。功能结果与同步保存完全一致，弹窗/提示由主线程回调触发。
+
+    信号：
+    - saved(): 保存且完整性校验通过
+    - failed(str): 保存或校验失败的错误信息
+    """
+
+    saved = Signal()
+    failed = Signal(str)
+
+    def __init__(self, wb, path: str, wb_cached=None) -> None:
+        super().__init__()
+        self.wb = wb
+        self.path = path
+        self.wb_cached = wb_cached
+
+    def run(self) -> None:  # noqa: D401
+        try:
+            ExcelLoader.save_workbook(self.wb, self.path, cached_wb=self.wb_cached)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
+            return
+        # 完整性校验：重新加载确认未损坏（与同步版 _verify_integrity 一致）
+        try:
+            ExcelLoader.load_workbook(self.path)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"完整性校验失败: {e}")
+            return
+        self.saved.emit()
+
+
+class ReloadWorkbookWorker(QThread):
+    """保存后重载线程：后台重新加载指定侧工作簿（含缓存副本）。
+
+    仅用于手动保存后的内存刷新（后续无立即依赖新 wb 的同步流程）；
+    调用方应在重载期间禁用主窗口，防止竞态。功能结果与同步重载一致。
+    """
+
+    reloaded = Signal(object, object)   # (wb, wb_cached)
+    failed = Signal(str)
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.path = path
+
+    def run(self) -> None:  # noqa: D401
+        try:
+            wb = ExcelLoader.load_workbook(self.path)
+            wb_cached = None
+            if ExcelLoader.has_formula_cells(wb):
+                wb_cached = ExcelLoader.load_workbook_cached(self.path)
+            self.reloaded.emit(wb, wb_cached)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
 
 
 class MergeWorker(QThread):

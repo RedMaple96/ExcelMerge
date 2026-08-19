@@ -65,7 +65,13 @@ from src.gui.diff_highlight_delegate import (
     escape_segment,
 )
 from src.gui.themes import is_dark_mode
-from src.gui.workers import CompareWorker, SheetDiffSummaryWorker
+from src.gui.workers import (
+    CompareWorker,
+    LoadWorkbookWorker,
+    ReloadWorkbookWorker,
+    SaveWorker,
+    SheetDiffSummaryWorker,
+)
 
 
 class MainWindow(QMainWindow):
@@ -99,6 +105,10 @@ class MainWindow(QMainWindow):
         self._current_diff_pos: int = -1  # 差异导航游标（指向 diff_row_indices）
         self._compare_worker: Optional[CompareWorker] = None  # 比较后台线程
         self._sheet_summary_worker: Optional[SheetDiffSummaryWorker] = None  # 全sheet差异预计算线程
+        self._load_worker: Optional[LoadWorkbookWorker] = None  # 打开文件后台加载线程
+        self._pending_load: Optional[tuple] = None  # 加载在途时排队的 (side, path) 请求
+        self._reload_worker: Optional[ReloadWorkbookWorker] = None  # 保存后后台重载线程
+        self._save_worker: Optional[SaveWorker] = None  # 手动保存后台线程
         # 按侧别(left/right)跟踪脏状态与备份状态
         self._dirty = {"left": False, "right": False}  # 是否有未保存的修改
         self._backup_done = {"left": True, "right": True}  # 当前脏状态是否已备份
@@ -109,6 +119,16 @@ class MainWindow(QMainWindow):
         self._ctx_col: int = -1  # 视觉列
         # 双击自适应状态：(row, col) -> 展开前尺寸，用于再次双击恢复
         self._fit_cells: dict = {}
+        # SheetData 提取缓存：{(side, name): (gen, SheetData)}。
+        # 重复切换同一 Sheet 时免重新提取（提取是 O(rows*cols) 的重操作）。
+        # gen 为每侧代际计数：任何修改/重载/换文件都会递增使该侧缓存整体失效，
+        # 确保缓存永远与当前 workbook 状态一致（不会返回过期数据）。
+        self._sheet_data_cache: dict = {}
+        self._sheet_cache_gen: dict = {"left": 0, "right": 0}
+        # 差异渲染增量复位跟踪：上次渲染中设置过背景/高亮/隐藏的单元格与行。
+        # 重渲染时只复位这些位置，避免全表扫描（大表切换过滤器提速）。
+        self._painted_cells: dict = {}   # QTableWidget -> set[(row, col)]
+        self._hidden_rows: dict = {}    # QTableWidget -> set[row]
 
         # ---- 底部导航栏相关状态 ----
         self._sheet_diff_summary: dict = {}  # sheet_name -> has_diff (bool)
@@ -547,9 +567,12 @@ class MainWindow(QMainWindow):
         self.open_right()
 
     def load_file(self, side: str, path: str) -> None:
-        """加载指定侧文件：校验格式 -> 加载工作簿 -> 填充 Sheet 下拉 -> 切换 Sheet。
+        """加载指定侧文件：校验格式 -> 后台加载工作簿 -> 填充 Sheet 下拉 -> 切换 Sheet。
 
         side: "left" 或 "right"。
+        工作簿解析（含 data_only 缓存副本）在后台线程执行，避免大文件
+        打开时 UI 冻结；加载期间禁用主窗口，交互语义与同步加载一致，
+        完成后在主线程回调中继续原流程，功能结果不变。
         """
         if not os.path.exists(path):
             QMessageBox.warning(
@@ -564,21 +587,43 @@ class MainWindow(QMainWindow):
             if not self._check_unsaved_before_switch():
                 return
 
-        try:
-            wb = ExcelLoader.load_workbook(path)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "加载失败", f"无法加载文件:\n{path}\n\n{exc}")
+        # 防重入：已有加载在途时排队，前一个完成后自动加载（不丢弃请求，
+        # 否则命令行双文件启动时第二个文件永远不会加载）
+        if self._load_worker is not None and self._load_worker.isRunning():
+            self._pending_load = (side, path)
+            self.update_status("正在加载文件，请稍候...")
             return
 
-        # 仅当工作簿含公式时才加载 data_only=True 副本；无公式文件跳过
-        # 第二次文件解析，加载更快且比较行为不变（缓存副本加载失败不致命）
-        wb_cached = None
-        try:
-            if ExcelLoader.has_formula_cells(wb):
-                wb_cached = ExcelLoader.load_workbook_cached(path)
-        except Exception:  # noqa: BLE001
-            wb_cached = None
+        self.update_status(f"正在加载 {os.path.basename(path)} ...")
+        self.setEnabled(False)  # 加载期间禁止操作，等价于同步阻塞的交互语义
 
+        self._load_worker = LoadWorkbookWorker(path)
+        self._load_worker.loaded.connect(
+            lambda wb, wb_cached, s=side, p=path: self._on_workbook_loaded(s, p, wb, wb_cached)
+        )
+        self._load_worker.failed.connect(
+            lambda err, p=path: self._on_workbook_load_failed(p, err)
+        )
+        self._load_worker.start()
+
+    def _finish_load_worker(self) -> None:
+        """加载/失败回调收尾：清理线程引用，执行排队的加载或恢复窗口可用。"""
+        self._load_worker = None
+        pending = self._pending_load
+        if pending is not None:
+            self._pending_load = None
+            self.load_file(*pending)   # 内部会再次禁用窗口，链式完成排队请求
+            return
+        self.setEnabled(True)
+
+    def _on_workbook_load_failed(self, path: str, err: str) -> None:
+        """后台加载失败：与同步路径相同的错误弹窗与提示。"""
+        self._finish_load_worker()
+        QMessageBox.critical(self, "加载失败", f"无法加载文件:\n{path}\n\n{err}")
+
+    def _on_workbook_loaded(self, side: str, path: str, wb, wb_cached) -> None:
+        """后台加载成功：继续同步路径的后续流程（与原逻辑一致）。"""
+        self._finish_load_worker()
         sheet_names = ExcelLoader.get_sheet_names(wb)
         if not sheet_names:
             QMessageBox.warning(self, "空工作簿", f"文件中没有工作表:\n{path}")
@@ -594,6 +639,8 @@ class MainWindow(QMainWindow):
             self.right_wb = wb
             self.right_wb_cached = wb_cached
             combo = self.right_sheet_combo
+        # 换了新 workbook 对象，旧提取缓存全部失效
+        self._invalidate_sheet_cache(side)
 
         # 填充下拉（屏蔽信号避免重复触发）
         combo.blockSignals(True)
@@ -786,6 +833,7 @@ class MainWindow(QMainWindow):
 
         self._dirty[side] = False
         self._backup_done[side] = True
+        self._invalidate_sheet_cache(side)
 
     def _on_sheet_changed(self, side: str) -> None:
         """下拉切换 Sheet：提取 SheetData -> 刷新表格 -> 触发比较。"""
@@ -819,6 +867,10 @@ class MainWindow(QMainWindow):
         # 同步底部导航栏激活标签
         self.bottom_bar.set_active(name)
 
+    def _invalidate_sheet_cache(self, side: str) -> None:
+        """使指定侧的 SheetData 提取缓存失效（数据被修改/重载/替换时调用）。"""
+        self._sheet_cache_gen[side] = self._sheet_cache_gen.get(side, 0) + 1
+
     def _load_sheet_data(self, side: str, name: str) -> bool:
         """加载指定侧指定 Sheet 的数据到内存。
 
@@ -828,17 +880,29 @@ class MainWindow(QMainWindow):
         wb_cached = self.left_wb_cached if side == "left" else self.right_wb_cached
         if wb is None:
             return False
-        try:
-            ws = ExcelLoader.get_worksheet(wb, name)
-            cached_ws = (
-                ExcelLoader.get_worksheet(wb_cached, name)
-                if wb_cached is not None and name in wb_cached.sheetnames
-                else None
-            )
-            sheet_data = ExcelLoader.extract_sheet_data(ws, cached_ws)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Sheet 读取失败", f"无法读取工作表 {name}:\n{exc}")
-            return False
+        # 命中缓存（代际一致）时免重新提取，行为与现场提取完全一致
+        cached_entry = self._sheet_data_cache.get((side, name))
+        if (
+            cached_entry is not None
+            and cached_entry[0] == self._sheet_cache_gen.get(side, 0)
+            and cached_entry[1].worksheet is ExcelLoader.get_worksheet(wb, name)
+        ):
+            sheet_data = cached_entry[1]
+        else:
+            try:
+                ws = ExcelLoader.get_worksheet(wb, name)
+                cached_ws = (
+                    ExcelLoader.get_worksheet(wb_cached, name)
+                    if wb_cached is not None and name in wb_cached.sheetnames
+                    else None
+                )
+                sheet_data = ExcelLoader.extract_sheet_data(ws, cached_ws)
+                self._sheet_data_cache[(side, name)] = (
+                    self._sheet_cache_gen.get(side, 0), sheet_data,
+                )
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Sheet 读取失败", f"无法读取工作表 {name}:\n{exc}")
+                return False
 
         if side == "left":
             self.left_sheet_data = sheet_data
@@ -961,8 +1025,10 @@ class MainWindow(QMainWindow):
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         try:
-            # 表格重建后，之前的双击自适应状态随之失效
+            # 表格重建后，之前的双击自适应状态与涂色跟踪随之失效
             self._fit_cells.clear()
+            self._painted_cells.pop(table, None)
+            self._hidden_rows.pop(table, None)
             table.setRowCount(0)
             n_cols = len(aligned_cols)
             table.setColumnCount(n_cols)
@@ -999,6 +1065,11 @@ class MainWindow(QMainWindow):
                         # 无缓存数据：退化为公式
                         if sheet_data.cached_values is None:
                             text = formula
+                        elif not formula and not cached:
+                            # 本侧为空：无论对侧如何，显示文本均为 ""，
+                            # 跳过对侧取值（结果与原逻辑完全一致）
+                            table.setItem(r, c, QTableWidgetItem(""))
+                            continue
                         else:
                             # 默认显示文本值；same 列且两侧文本值一致、
                             # 公式不同时显示公式
@@ -1255,15 +1326,18 @@ class MainWindow(QMainWindow):
         self.left_table.setUpdatesEnabled(False)
         self.right_table.setUpdatesEnabled(False)
         try:
-            # 1. 复位背景与行隐藏
+            # 1. 复位背景与行隐藏（增量：只复位上次渲染实际涂过/隐藏过的位置，
+            #    与旧版全量复位后的状态完全一致——未记录的单元格从未被修改过）
             for table in (self.left_table, self.right_table):
-                for r in range(table.rowCount()):
-                    table.setRowHidden(r, False)
-                    for c in range(table.columnCount()):
-                        item = table.item(r, c)
-                        if item is not None:
-                            item.setBackground(transparent)
-                            item.setData(HIGHLIGHT_RANGES_ROLE, None)
+                for r in self._hidden_rows.pop(table, set()):
+                    if r < table.rowCount():
+                        table.setRowHidden(r, False)
+                painted = self._painted_cells.pop(table, set())
+                for r, c in painted:
+                    item = table.item(r, c)
+                    if item is not None:
+                        item.setBackground(transparent)
+                        item.setData(HIGHLIGHT_RANGES_ROLE, None)
 
             # 2. 无比较结果时直接返回
             if not self.diff_result:
@@ -1342,6 +1416,8 @@ class MainWindow(QMainWindow):
             right_item.setBackground(QBrush(cell_bg))
             left_item.setData(HIGHLIGHT_RANGES_ROLE, left_ranges or None)
             right_item.setData(HIGHLIGHT_RANGES_ROLE, right_ranges or None)
+            self._record_painted(self.left_table, row, col)
+            self._record_painted(self.right_table, row, col)
         else:
             color = self._diff_colors()["diff_cell"]
             self._paint_cell(self.left_table, row, col, color)
@@ -1382,6 +1458,12 @@ class MainWindow(QMainWindow):
         """同时隐藏两侧表格的指定行。"""
         self.left_table.setRowHidden(row, True)
         self.right_table.setRowHidden(row, True)
+        self._hidden_rows.setdefault(self.left_table, set()).add(row)
+        self._hidden_rows.setdefault(self.right_table, set()).add(row)
+
+    def _record_painted(self, table: QTableWidget, row: int, col: int) -> None:
+        """记录破涂色/高亮的单元格，供下次渲染增量复位。"""
+        self._painted_cells.setdefault(table, set()).add((row, col))
 
     def _paint_row(self, table: QTableWidget, row: int, color: QColor) -> None:
         """为指定行的所有单元格设置背景色。"""
@@ -1390,6 +1472,7 @@ class MainWindow(QMainWindow):
             item = table.item(row, c)
             if item is not None:
                 item.setBackground(brush)
+                self._record_painted(table, row, c)
 
     def _paint_col(self, table: QTableWidget, col: int, color: QColor) -> None:
         """为指定列的所有单元格设置背景色（用于虚拟空列）。"""
@@ -1398,6 +1481,7 @@ class MainWindow(QMainWindow):
             item = table.item(r, col)
             if item is not None:
                 item.setBackground(brush)
+                self._record_painted(table, r, col)
 
     def _paint_cell(
         self, table: QTableWidget, row: int, col: int, color: QColor
@@ -1406,6 +1490,7 @@ class MainWindow(QMainWindow):
         item = table.item(row, col)
         if item is not None:
             item.setBackground(QBrush(color))
+            self._record_painted(table, row, col)
 
     def _update_stat_labels(self) -> None:
         """更新状态栏的行/差异数，按类型分别显示。"""
@@ -1447,14 +1532,71 @@ class MainWindow(QMainWindow):
             return
 
         if choice == "保存左侧":
-            self._save_side("left")
+            self._save_side_async("left")
         elif choice == "保存右侧":
-            self._save_side("right")
+            self._save_side_async("right")
         else:  # 保存全部
             left_msg = self._save_side("left", quiet=True)
             right_msg = self._save_side("right", quiet=True)
             # 汇总两侧结果
             self.update_status(f"左侧: {left_msg}；右侧: {right_msg}")
+
+    def _save_side_async(self, side: str) -> None:
+        """手动保存（菜单触发）：保存+校验+重载全部后台执行。
+
+        与同步 _save_side(quiet=False) 的用户可见行为一致：前置检查提示、
+        备份、失败弹窗、成功后状态栏提示均保持相同文案与顺序；仅将重 IO
+        移出 UI 线程，保存期间禁用窗口防竞态。
+        """
+        wb = self.left_wb if side == "left" else self.right_wb
+        wb_cached = self.left_wb_cached if side == "left" else self.right_wb_cached
+        path = self.left_path if side == "left" else self.right_path
+        side_label = "左侧" if side == "left" else "右侧"
+
+        if not (wb and path):
+            QMessageBox.warning(self, "无可保存", f"{side_label}无可保存的文件")
+            return
+        if not self._dirty[side]:
+            self.update_status(f"{side_label}无未保存更改")
+            return
+        if self._save_worker is not None and self._save_worker.isRunning():
+            self.update_status("正在保存，请稍候...")
+            return
+
+        # 备份（文件拷贝较快，保持同步；失败仅警告不阻断，与同步版一致）
+        self._backup_if_needed(side)
+        self.update_status(f"正在保存 {os.path.basename(path)} ...")
+        self.setEnabled(False)
+
+        self._save_worker = SaveWorker(wb, path, wb_cached)
+
+        def _on_saved(s=side, p=path, label=side_label):
+            self._save_worker = None
+            # 保存+校验成功：复位脏标记，后台重载内存（期间继续禁用窗口）
+            self._dirty[s] = False
+            self._backup_done[s] = True
+            self._invalidate_sheet_cache(s)
+            self._reload_workbook_async(s)
+            self.update_status(f"{label}已保存")
+
+        def _on_failed(err, s=side, p=path, label=side_label):
+            self._save_worker = None
+            self.setEnabled(True)
+            # 与同步版失败提示一致：区分保存失败与校验失败
+            if err.startswith("完整性校验失败"):
+                QMessageBox.warning(
+                    self, "完整性校验", f"保存文件可能损坏: {err.split(': ', 1)[-1]}"
+                )
+                self.update_status(f"{label}完整性校验失败")
+            else:
+                QMessageBox.critical(
+                    self, "保存失败", f"保存文件失败:\n{p}\n\n{err}"
+                )
+                self.update_status(f"{label}保存失败: {err}")
+
+        self._save_worker.saved.connect(_on_saved)
+        self._save_worker.failed.connect(_on_failed)
+        self._save_worker.start()
 
     def _save_side(self, side: str, quiet: bool = False) -> str:
         """保存指定侧工作簿到原路径。
@@ -1499,12 +1641,49 @@ class MainWindow(QMainWindow):
 
         # 保存成功后从磁盘重载 wb 和 wb_cached，确保内存与磁盘一致
         # 这样后续切换 sheet 时，即使 _dirty 为 False 不再重载，数据也是最新的
-        self._reload_workbook(side)
+        if quiet:
+            # quiet 路径（切换前的保存确认）：调用方紧接着就用新 wb，必须同步重载
+            self._reload_workbook(side)
+        else:
+            # 手动保存路径：后台重载，期间禁用窗口防竞态，结果与同步一致且 UI 不冻结
+            self._reload_workbook_async(side)
 
         msg = f"{side_label}已保存"
         if not quiet:
             self.update_status(msg)
         return msg
+
+    def _reload_workbook_async(self, side: str) -> None:
+        """保存后后台重载工作簿：功能结果与同步 _reload_workbook 一致。"""
+        if self._reload_worker is not None and self._reload_worker.isRunning():
+            # 已有重载在途：直接同步重载兑底（极端场景，保证结果正确）
+            self._reload_workbook(side)
+            self.setEnabled(True)
+            return
+        path = self.left_path if side == "left" else self.right_path
+        self.setEnabled(False)
+        self._reload_worker = ReloadWorkbookWorker(path)
+
+        def _on_reloaded(wb, wb_cached, s=side):
+            self._reload_worker = None
+            self.setEnabled(True)
+            if s == "left":
+                self.left_wb = wb
+                self.left_wb_cached = wb_cached
+            else:
+                self.right_wb = wb
+                self.right_wb_cached = wb_cached
+            self._invalidate_sheet_cache(s)
+
+        def _on_reload_failed(_err):
+            self._reload_worker = None
+            self.setEnabled(True)
+            # 同步路径下重载失败仅弹警告；异步路径保持一致的提示行为
+            QMessageBox.warning(self, "重载失败", f"重新加载文件失败:\n{path}")
+
+        self._reload_worker.reloaded.connect(_on_reloaded)
+        self._reload_worker.failed.connect(_on_reload_failed)
+        self._reload_worker.start()
 
     def save_as(self) -> None:
         """另存左侧工作簿到用户指定路径，不改变 left_path。
@@ -1635,6 +1814,9 @@ class MainWindow(QMainWindow):
             self._dirty["right"],
             self._dirty["left"],
         )
+        # 两侧文件交换后，缓存键的侧别含义已变化，整体失效两侧
+        self._invalidate_sheet_cache("left")
+        self._invalidate_sheet_cache("right")
         self._backup_done["left"], self._backup_done["right"] = (
             self._backup_done["right"],
             self._backup_done["left"],
@@ -1863,6 +2045,7 @@ class MainWindow(QMainWindow):
         self._run_compare()
         self._dirty[side] = True
         self._backup_done[side] = False
+        self._invalidate_sheet_cache(side)
         # 合并后只重置当前sheet的差异状态，不重新计算所有sheet（避免阻塞UI）
         # 当前sheet的差异状态会在_compare完成后由_update_current_sheet_diff_status更新
 
@@ -1893,6 +2076,7 @@ class MainWindow(QMainWindow):
     def _mark_side_dirty(self, side: str) -> None:
         self._dirty[side] = True
         self._backup_done[side] = False
+        self._invalidate_sheet_cache(side)
 
     def _copy_whole_sheet(self, source_side: str) -> None:
         """把仅一侧存在的当前 Sheet 整表复制并新增到对侧。"""
@@ -2865,9 +3049,11 @@ class MainWindow(QMainWindow):
         if renamed_left:
             self._dirty["left"] = True
             self._backup_done["left"] = False
+            self._invalidate_sheet_cache("left")
         if renamed_right:
             self._dirty["right"] = True
             self._backup_done["right"] = False
+            self._invalidate_sheet_cache("right")
         self.update_status(f"已重命名: {old_name} → {new_name}（仅本地）")
 
     def _on_tab_sheet_closed(self, name: str, close_others: bool) -> None:
@@ -3032,7 +3218,13 @@ class MainWindow(QMainWindow):
 
     def _stop_workers_for_quit(self) -> None:
         """退出前停止并等待后台线程，避免 QThread 随进程销毁而崩溃。"""
-        for worker in (self._compare_worker, self._sheet_summary_worker):
+        for worker in (
+            self._compare_worker,
+            self._sheet_summary_worker,
+            self._load_worker,
+            self._reload_worker,
+            self._save_worker,
+        ):
             if worker is not None and worker.isRunning():
                 worker.requestInterruption()
                 worker.wait()

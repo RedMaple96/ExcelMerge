@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+import weakref
 import zipfile
 from copy import copy
 from dataclasses import dataclass, field
@@ -161,18 +162,32 @@ class ExcelLoader:
                 values[row - 1][col - 1] = ExcelLoader._stringify(val)
         return actual_max_row, actual_max_col, values
 
+    # has_formula_cells 结果按 workbook 对象弱引用缓存：同一 wb 重复询问
+    # （加载、重载、保存校验等路径）时免重复全表扫描；wb 被释放后缓存自动失效
+    _has_formula_cache = weakref.WeakKeyDictionary()
+
     @staticmethod
     def has_formula_cells(wb: Workbook) -> bool:
         """判断工作簿中是否存在公式单元格。
 
         用于决定是否需要额外加载 data_only=True 的缓存值副本：没有公式时
         跳过第二次文件解析，可比对性能有显著收益，且行为完全一致。
+        结果按 wb 对象缓存（弱引用）；同一 wb 的任何修改后需重新加载才会
+        重新询问，缓存只覆盖“未变更的同一 wb 对象”，行为不变。
         """
+        cached = ExcelLoader._has_formula_cache.get(wb)
+        if cached is not None:
+            return cached
+        result = False
         for ws in wb.worksheets:
             for _row, _col, cell in ExcelLoader._iter_cells(ws):
                 if ExcelLoader._is_formula_cell(cell):
-                    return True
-        return False
+                    result = True
+                    break
+            if result:
+                break
+        ExcelLoader._has_formula_cache[wb] = result
+        return result
 
     @staticmethod
     def extract_sheet_data(
@@ -233,10 +248,8 @@ class ExcelLoader:
                 copy_r = min(max_row, c_rows)
                 copy_c = min(max_col, c_cols)
                 for r in range(copy_r):
-                    src_row = cached_grid[r]
-                    dst_row = cached_values[r]
-                    for c in range(copy_c):
-                        dst_row[c] = src_row[c]
+                    # 行级切片拷贝，比逐格赋值快
+                    cached_values[r][:copy_c] = cached_grid[r][:copy_c]
             # 合并单元格同样用左上角缓存值填充
             for mr in cached_ws.merged_cells.ranges:
                 min_r, min_c = mr.min_row, mr.min_col
@@ -396,17 +409,18 @@ class ExcelLoader:
                 ws = wb[sheet_name]
                 cached_ws = cached_wb[sheet_name]
                 sheet_values: Dict[str, str] = {}
-                # 遍历主wb中所有单元格，对公式单元格从cached_wb取缓存值
-                for row in ws.iter_rows():
-                    for cell in row:
-                        if ExcelLoader._is_formula_cell(cell):
-                            try:
-                                cached_cell = cached_ws[cell.coordinate]
-                                cached_val = cached_cell.value
-                                if cached_val is not None:
-                                    sheet_values[cell.coordinate] = ExcelLoader._stringify(cached_val)
-                            except Exception:
-                                pass
+                # 遍历主wb中所有实际存在的单元格（_cells 字典，仅碰有值单元格），
+                # 对公式单元格从cached_wb取缓存值。
+                # 与 iter_rows 相比避免物化整行 EmptyCell，大表保存提速明显。
+                for _row, _col, cell in ExcelLoader._iter_cells(ws):
+                    if ExcelLoader._is_formula_cell(cell):
+                        try:
+                            cached_cell = cached_ws[cell.coordinate]
+                            cached_val = cached_cell.value
+                            if cached_val is not None:
+                                sheet_values[cell.coordinate] = ExcelLoader._stringify(cached_val)
+                        except Exception:
+                            pass
                 if sheet_values:
                     result[sheet_name] = sheet_values
 
@@ -500,13 +514,20 @@ class ExcelLoader:
                         and item.filename.endswith(".xml")
                     )
                     if is_sheet_xml:
-                        xml = data.decode("utf-8")
                         # 找到该 XML 对应的 sheet 名
                         target_sheet = None
                         for name, xml_path in sheet_mapping.items():
                             if xml_path == item.filename:
                                 target_sheet = name
                                 break
+                        # 仅在确实需要注入时才 decode，大 sheet 避免无谓的字符串构建
+                        if not (
+                            (target_sheet and target_sheet in cached_values)
+                            or (not sheet_mapping and cached_values)
+                        ):
+                            zout.writestr(item, data)
+                            continue
+                        xml = data.decode("utf-8")
                         if target_sheet and target_sheet in cached_values:
                             value_map = cached_values[target_sheet]
                             xml = ExcelLoader._inject_xml_cached_values(

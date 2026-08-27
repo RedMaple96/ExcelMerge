@@ -66,5 +66,5 @@ app = BUNDLE(
     name="ExcelMerge.app",
     icon="resources/icons/icon.icns" if os.path.exists("resources/icons/icon.icns") else None,
     bundle_identifier="com.excelmerge.app",
-    version="1.0.3",
+    version="1.0.4",
 )

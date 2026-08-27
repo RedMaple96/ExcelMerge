@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
-## [1.0.3] - 2026-08-18
+## [1.0.4] - 2026-08-27
+
+### Added
+
+- 新增 Sheet 级整表覆盖：右键菜单“复制当前整表到对侧（覆盖）”，用源侧当前工作表完整内容替换对侧同名工作表（保留对侧工作表顺序）。
+- 新增文件级整体替换：编辑菜单“文件级替换：左侧覆盖右侧 / 右侧覆盖左侧”，用一侧工作簿全部内容（含所有工作表与顺序）完整替换另一侧，保存后写回被替换侧原路径。
 
 ### Fixed
 
@@ -57,4 +62,5 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 [0.1.0]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v0.1.0
 [1.0.2]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.2
+[1.0.4]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.4
 [1.0.3]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.3

@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
 [![openpyxl](https://img.shields.io/badge/openpyxl-3.1%2B-217346?style=for-the-badge)](https://openpyxl.readthedocs.io/)
-[![版本](https://img.shields.io/badge/version-1.0.3-blue?style=for-the-badge)](./CHANGELOG.md)
+[![版本](https://img.shields.io/badge/version-1.0.4-blue?style=for-the-badge)](./CHANGELOG.md)
 
 ExcelMerge 是一个面向 **Excel 差异比对与合并** 场景的桌面应用（macOS / Windows），适用于加载两个 `.xlsx` 文件、识别行列与单元格级差异、执行覆盖或追加合并，并以可视化方式辅助人工确认。
 
@@ -25,7 +25,7 @@ ExcelMerge 是一个面向 **Excel 差异比对与合并** 场景的桌面应用
 
 ### 合并
 
-- 合并策略：右覆盖左、左覆盖右、追加差异行、整表复制、行/列/单元格级复制与增删。
+- 合并策略：右覆盖左、左覆盖右、追加差异行、整表复制、整表覆盖（同名 Sheet 内容替换）、文件级整体替换、行/列/单元格级复制与增删。
 - 正确处理合并单元格：插入/删除行列后自动重建合并区域，覆盖写前自动解除阻碍合并。
 - 未保存确认：关闭窗口或覆盖打开文件前提示保存，避免修改静默丢失。
 
@@ -109,6 +109,25 @@ packaging\windows_build.bat
     cmd = excelmerge-diff "$LOCAL" "$REMOTE"
 ```
 
+对比结果仅用于查看时用上面的配置即可。若需要在 ExcelMerge 中编辑并**保存回工作区**（而非只改临时副本），请改用 dir-diff + symlinks：
+
+```bash
+git difftool --dir-diff --symlinks --tool=excelmerge
+```
+
+此模式下 `$LOCAL`/`$REMOTE` 传的是左右两个目录，工作区文件以符号链接形式出现，ExcelMerge 会自动解析符号链接并把保存写回真实工作区文件。
+
+### 外部合并工具（SourceTree 等 GUI）
+
+如果通过 SourceTree 等 GUI 调起，且希望把合并结果保存回本地工作区文件，请在 SourceTree 的「外部合并工具(External Merge)」中配置为 ExcelMerge：
+
+```
+Merge Command: /Applications/ExcelMerge.app/Contents/MacOS/ExcelMerge
+Arguments:    $LOCAL $REMOTE $MERGED
+```
+
+参数顺序固定为「左输入、右输入、输出到真实工作区文件」。在 ExcelMerge 中把右侧差异合并到左侧后点保存（默认保存全部），结果会写回 `$MERGED` 对应的本地文件。
+
 ## 编程接口（核心模块）
 
 核心比较与合并逻辑独立于 GUI，可直接在 Python 中使用：
@@ -155,4 +174,4 @@ python -m unittest discover -s tests
 
 ## 更新日志
 
-见 [CHANGELOG.md](./CHANGELOG.md)，当前版本 `v1.0.3`（2026-08-18）。
+见 [CHANGELOG.md](./CHANGELOG.md)，当前版本 `v1.0.4`（2026-08-27）。

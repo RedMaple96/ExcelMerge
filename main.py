@@ -65,15 +65,18 @@ def _activate_macos_app() -> None:
         pass
 
 
-def _parse_cli_args(argv: List[str]) -> Tuple[Optional[str], Optional[str]]:
-    """解析命令行参数，提取左右两个文件路径。
+def _parse_cli_args(argv: List[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """解析命令行参数，提取左右文件与可选合并输出路径。
 
-    支持两种调用方式：
+    支持三种调用方式：
     1. 直接传入：ExcelMerge left.xlsx right.xlsx
     2. Git difftool 格式（含 -L 标签选项）：
        ExcelMerge -L "左标签" -L "右标签" /tmp/left.xlsx /tmp/right.xlsx
+    3. 外部合并工具（SourceTree External Merge）：
+       ExcelMerge $LOCAL $REMOTE $MERGED
+       前两个为左/右输入，第三个为需写回真实工作区文件的输出路径。
 
-    返回 (left_path, right_path)，未提供时为 None。
+    返回 (left_path, right_path, merge_target)，未提供时为 None。
     """
     args = argv[1:]
     files: List[str] = []
@@ -95,7 +98,8 @@ def _parse_cli_args(argv: List[str]) -> Tuple[Optional[str], Optional[str]]:
 
     left = files[0] if len(files) >= 1 else None
     right = files[1] if len(files) >= 2 else None
-    return left, right
+    merged = files[2] if len(files) >= 3 else None
+    return left, right, merged
 
 
 def main() -> int:
@@ -104,7 +108,7 @@ def main() -> int:
     _set_macos_process_name("ExcelMerge")
 
     # 解析命令行参数
-    left_path, right_path = _parse_cli_args(sys.argv)
+    left_path, right_path, merge_target = _parse_cli_args(sys.argv)
 
     app = QApplication(sys.argv)
     app.setApplicationName("ExcelMerge")
@@ -138,8 +142,19 @@ def main() -> int:
     window = MainWindow()
 
     # 若命令行传入了文件，在窗口显示后自动加载
-    if left_path or right_path:
+    if left_path or right_path or merge_target:
         def _load_files() -> None:
+            # 外部合并工具模式：$LOCAL $REMOTE $MERGED，保存左侧写回 $MERGED
+            if merge_target and left_path and right_path:
+                window.load_merge_files(left_path, right_path, merge_target)
+                return
+            # git difftool --dir-diff --symlinks 传入的是左右两个目录
+            if (
+                left_path and right_path
+                and os.path.isdir(left_path) and os.path.isdir(right_path)
+            ):
+                window.load_diff_dirs(left_path, right_path)
+                return
             if left_path and os.path.exists(left_path):
                 window.load_file("left", left_path)
             if right_path and os.path.exists(right_path):

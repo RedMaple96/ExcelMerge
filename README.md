@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
 [![openpyxl](https://img.shields.io/badge/openpyxl-3.1%2B-217346?style=for-the-badge)](https://openpyxl.readthedocs.io/)
-[![Version](https://img.shields.io/badge/version-1.0.3-blue?style=for-the-badge)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.4-blue?style=for-the-badge)](./CHANGELOG.md)
 
 ExcelMerge is a desktop application (macOS / Windows) for **Excel diff and merge**: load two `.xlsx` workbooks, identify row/column/cell-level differences, apply overwrite or append merges, and confirm results visually.
 
@@ -25,7 +25,7 @@ ExcelMerge is a desktop application (macOS / Windows) for **Excel diff and merge
 
 ### Merge
 
-- Strategies: right-over-left, left-over-right, append diff rows, whole-sheet copy, and row/column/cell-level copy/insert/delete.
+- Strategies: right-over-left, left-over-right, append diff rows, whole-sheet copy, sheet-level replace (overwrite the same-named sheet), file-level replace, and row/column/cell-level copy/insert/delete.
 - Merged-cell aware: merged ranges are rebuilt after row/column insert/delete and blocking merges are released before overwriting.
 - Unsaved-change confirmation on window close or file re-open.
 
@@ -110,6 +110,25 @@ packaging\windows_build.bat
     cmd = excelmerge-diff "$LOCAL" "$REMOTE"
 ```
 
+The config above is for read-only comparison. To edit in ExcelMerge and **save back to the working tree** (rather than only modifying the temp copy), use dir-diff + symlinks:
+
+```bash
+git difftool --dir-diff --symlinks --tool=excelmerge
+```
+
+In this mode `$LOCAL`/`$REMOTE` are the two directory trees, the working-copy file appears as a symlink, and ExcelMerge resolves the symlink and saves back to the real file.
+
+### External merge tool (SourceTree and other GUIs)
+
+When launched from SourceTree or another GUI and you want edits saved back to the working-copy file, configure ExcelMerge as the **External Merge tool**:
+
+```
+Merge Command: /Applications/ExcelMerge.app/Contents/MacOS/ExcelMerge
+Arguments:    $LOCAL $REMOTE $MERGED
+```
+
+The argument order is fixed as `left input, right input, output-to-real-working-copy-file`. Merge the right side into the left in ExcelMerge, then save (the default saves all) and the result is written back to the local file referenced by `$MERGED`.
+
 ## Programmatic API (Core Modules)
 
 The core comparison/merge logic is GUI-independent and reusable:
@@ -156,4 +175,4 @@ Covers comparator, merger, loader, char diff, sheet matching, bottom bar, highli
 
 ## Changelog
 
-See [CHANGELOG.md](./CHANGELOG.md). Current version: `v1.0.3` (2026-08-18).
+See [CHANGELOG.md](./CHANGELOG.md). Current version: `v1.0.4` (2026-08-27).

@@ -75,6 +75,38 @@ class ExcelMerger:
             target_ws.auto_filter.ref = source_ws.auto_filter.ref
         return target_ws
 
+    @staticmethod
+    def replace_sheet_in_workbook(source: SheetData, target_wb: Workbook) -> Worksheet:
+        """用源 Sheet 的完整内容替换目标工作簿中的同名工作表（保持原顺序位置）。"""
+        title = source.worksheet.title
+        if title not in target_wb.sheetnames:
+            raise ValueError(f"目标工作簿不存在同名工作表: {title}")
+        old_index = target_wb.sheetnames.index(title)
+        target_wb.remove(target_wb[title])
+        new_ws = ExcelMerger.copy_sheet_to_workbook(source, target_wb, title)
+        # 新表追加在末尾，移回原位置
+        current_index = target_wb.sheetnames.index(title)
+        if current_index != old_index:
+            target_wb.move_sheet(new_ws, offset=old_index - current_index)
+        return new_ws
+
+    @staticmethod
+    def clone_workbook(source_wb: Workbook) -> Workbook:
+        """将源工作簿的全部工作表按原顺序完整复制为一个新工作簿。
+
+        用于文件级整体替换：新工作簿仅含源工作簿内容的副本，
+        目标侧路径保持不变，保存时写回目标侧原路径。
+        """
+        from openpyxl import Workbook as _Workbook
+
+        new_wb = _Workbook()
+        default_ws = new_wb.active
+        new_wb.remove(default_ws)
+        for name in source_wb.sheetnames:
+            source_data = ExcelLoader.extract_sheet_data(source_wb[name])
+            ExcelMerger.copy_sheet_to_workbook(source_data, new_wb, name)
+        return new_wb
+
     # ------------------------------------------------------------------ #
     # 合并单元格维护（openpyxl 的 insert/delete_rows/cols 不会同步移动
     # merged ranges，必须按 Excel 语义手动调整，否则会错位甚至丢数据）

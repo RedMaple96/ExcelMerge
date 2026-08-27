@@ -14,7 +14,7 @@ import shutil
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSettings, QSize, Qt
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -110,6 +110,12 @@ class MainWindow(QMainWindow):
         self._pending_load: Optional[tuple] = None  # 加载在途时排队的 (side, path) 请求
         self._reload_worker: Optional[ReloadWorkbookWorker] = None  # 保存后后台重载线程
         self._save_worker: Optional[SaveWorker] = None  # 手动保存后台线程
+        self._merge_target: Optional[str] = None  # 外部合并工具模式下，须写回的真实工作区文件路径
+        # 用户偏好：保存前是否自动备份原文件（可用菜单开关变更，持久化）
+        self.settings = QSettings("ExcelMerge", "ExcelMerge")
+        self._backup_enabled: bool = self.settings.value(
+            "backup_before_save", False, type=bool
+        )
         # 按侧别(left/right)跟踪脏状态与备份状态
         self._dirty = {"left": False, "right": False}  # 是否有未保存的修改
         self._backup_done = {"left": True, "right": True}  # 当前脏状态是否已备份
@@ -280,6 +286,16 @@ class MainWindow(QMainWindow):
         self.action_save_as.triggered.connect(self.save_as)
         m_session.addAction(self.action_save_as)
 
+        self.action_auto_backup = QAction("保存前自动备份", self)
+        self.action_auto_backup.setCheckable(True)
+        self.action_auto_backup.setChecked(self._backup_enabled)
+        self.action_auto_backup.setToolTip(
+            "开启后，存在未保存修改时，保存前会先创建一份"
+            "<文件名>_backup_<时间戳>.xlsx 备份；\n关闭后保存不再生成备份文件。"
+        )
+        self.action_auto_backup.toggled.connect(self._on_toggle_auto_backup)
+        m_session.addAction(self.action_auto_backup)
+
         m_session.addSeparator()
 
         self.action_swap = QAction("交换左右", self)
@@ -303,6 +319,20 @@ class MainWindow(QMainWindow):
         self.action_copy_cell.setShortcut(QKeySequence.Copy)
         self.action_copy_cell.triggered.connect(self.copy_cell)
         m_edit.addAction(self.action_copy_cell)
+
+        m_edit.addSeparator()
+
+        self.action_replace_file_right_from_left = QAction("文件级替换：左侧覆盖右侧", self)
+        self.action_replace_file_right_from_left.triggered.connect(
+            lambda: self._replace_whole_file("left")
+        )
+        m_edit.addAction(self.action_replace_file_right_from_left)
+
+        self.action_replace_file_left_from_right = QAction("文件级替换：右侧覆盖左侧", self)
+        self.action_replace_file_left_from_right.triggered.connect(
+            lambda: self._replace_whole_file("right")
+        )
+        m_edit.addAction(self.action_replace_file_left_from_right)
 
         # ---- 视图(V) ----
         m_view = menubar.addMenu("视图(&V)")
@@ -566,6 +596,61 @@ class MainWindow(QMainWindow):
 
     def _on_open_right(self) -> None:
         self.open_right()
+
+    @staticmethod
+    def _find_xlsx_files(dir_path: str) -> dict:
+        """递归统计目录下所有 .xlsx 文件，返回 {相对路径: 绝对路径}。"""
+        result = {}
+        for root, _dirs, files in os.walk(dir_path):
+            for name in files:
+                if name.lower().endswith(".xlsx"):
+                    full = os.path.join(root, name)
+                    rel = os.path.relpath(full, dir_path)
+                    result[rel] = full
+        return result
+
+    def load_merge_files(self, left: str, right: str, merged: str) -> None:
+        """外部合并工具模式：加载左右两个待合并输入，保存左侧时写回 merged。
+
+        merged 是 SourceTree External Merge 传入的 $MERGED（真实工作区文件）。
+        左=$LOCAL（我方）、右=$REMOTE（对方），用户在界面上把右侧差异合并到
+        左侧后保存，结果写回真实工作区文件。
+        """
+        self._merge_target = os.path.realpath(merged)
+        self.load_file("left", left)
+        self.load_file("right", right)
+
+    def load_diff_dirs(self, left_dir: str, right_dir: str) -> None:
+        """加载 git difftool --dir-diff --symlinks 传入的左右目录。
+
+        在两个目录树中找到同名 .xlsx 文件对；唯一时直接加载，多个时让用户
+        选择。右侧目录中的工作区文件通常是符号链接，加载前用 realpath 归一
+        化到真实文件路径，从而保存能写回本地分支文件。
+        """
+        left_files = self._find_xlsx_files(left_dir)
+        right_files = self._find_xlsx_files(right_dir)
+        common = sorted(set(left_files) & set(right_files))
+        if not common:
+            QMessageBox.warning(
+                self, "无可比对文件",
+                "左右目录中未找到同名 .xlsx 文件。\n\n"
+                f"左目录: {left_dir}\n右目录: {right_dir}",
+            )
+            return
+        if len(common) == 1:
+            rel = common[0]
+        else:
+            choice, ok = QInputDialog.getItem(
+                self, "选择文件", "选择要比对的 .xlsx 文件", common, 0, False
+            )
+            if not ok:
+                return
+            rel = choice
+        # realpath：解析 symlink，把右侧工作区文件指向真实路径，保证保存生效
+        left_path = os.path.realpath(left_files[rel])
+        right_path = os.path.realpath(right_files[rel])
+        self.load_file("left", left_path)
+        self.load_file("right", right_path)
 
     def load_file(self, side: str, path: str) -> None:
         """加载指定侧文件：校验格式 -> 后台加载工作簿 -> 填充 Sheet 下拉 -> 切换 Sheet。
@@ -1511,6 +1596,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # 保存与备份（Task 9 实装）
     # ------------------------------------------------------------------ #
+    def _on_toggle_auto_backup(self, enabled: bool) -> None:
+        """切换“保存前自动备份”开关，并持久化用户选择。"""
+        self._backup_enabled = enabled
+        self.settings.setValue("backup_before_save", enabled)
+        if enabled:
+            self.update_status("已开启：保存前自动备份")
+        else:
+            self.update_status("已关闭：保存前自动备份")
+
     def save(self) -> None:
         """保存工作簿到原路径。
 
@@ -1523,7 +1617,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无可保存", "无可保存的文件")
             return
 
-        items = ["保存左侧", "保存右侧", "保存全部"]
+        # 默认定位在“保存全部”，避免复制到对侧后按回车只保存了单侧
+        items = ["保存全部", "保存左侧", "保存右侧"]
         choice, ok = QInputDialog.getItem(
             self, "保存", "选择保存范围", items, 0, False
         )
@@ -1549,7 +1644,14 @@ class MainWindow(QMainWindow):
         """
         wb = self.left_wb if side == "left" else self.right_wb
         wb_cached = self.left_wb_cached if side == "left" else self.right_wb_cached
-        path = self.left_path if side == "left" else self.right_path
+        # realpath：解析符号链接（dir-diff --symlinks 模式右侧指向真实工作区文件），
+        # 否则 os.replace 会替换符号链接本身而写不回真实文件。
+        # 外部合并工具模式下，左侧保存需写回 $MERGED（真实工作区文件）。
+        raw_path = self.left_path if side == "left" else self.right_path
+        if side == "left" and self._merge_target:
+            path = self._merge_target
+        else:
+            path = os.path.realpath(raw_path)
         side_label = "左侧" if side == "left" else "右侧"
 
         if not (wb and path):
@@ -1571,6 +1673,9 @@ class MainWindow(QMainWindow):
 
         def _on_saved(s=side, p=path, label=side_label):
             self._save_worker = None
+            # 外部合并工具模式：左侧已写回 $MERGED，更新 left_path 指向真实文件
+            if s == "left" and self._merge_target:
+                self.left_path = self._merge_target
             # 保存+校验成功：复位脏标记，后台重载内存（期间继续禁用窗口）
             self._dirty[s] = False
             self._backup_done[s] = True
@@ -1608,7 +1713,14 @@ class MainWindow(QMainWindow):
         """
         wb = self.left_wb if side == "left" else self.right_wb
         wb_cached = self.left_wb_cached if side == "left" else self.right_wb_cached
-        path = self.left_path if side == "left" else self.right_path
+        # realpath：解析符号链接（dir-diff --symlinks 模式右侧指向真实工作区文件），
+        # 否则 os.replace 会替换符号链接本身而写不回真实文件。
+        # 外部合并工具模式下，左侧保存需写回 $MERGED（真实工作区文件）。
+        raw_path = self.left_path if side == "left" else self.right_path
+        if side == "left" and self._merge_target:
+            path = self._merge_target
+        else:
+            path = os.path.realpath(raw_path)
         side_label = "左侧" if side == "left" else "右侧"
 
         if not (wb and path):
@@ -1637,6 +1749,11 @@ class MainWindow(QMainWindow):
         # FR-05 可靠性：保存后完整性校验
         if not self._verify_integrity(path):
             return f"{side_label}完整性校验失败"
+
+        # 外部合并工具模式：左侧已写回 $MERGED，更新 left_path 指向真实文件，
+        # 使后续重载/显示/再保存都基于真实工作区文件
+        if side == "left" and self._merge_target:
+            self.left_path = self._merge_target
 
         # 保存成功后从磁盘重载 wb 和 wb_cached，确保内存与磁盘一致
         # 这样后续切换 sheet 时，即使 _dirty 为 False 不再重载，数据也是最新的
@@ -1727,6 +1844,9 @@ class MainWindow(QMainWindow):
         """
         path = self.left_path if side == "left" else self.right_path
         if not path:
+            return
+        if not self._backup_enabled:
+            # 用户已关闭“保存前自动备份”开关，跳过备份
             return
         if self._backup_done[side]:
             return
@@ -2107,6 +2227,97 @@ class MainWindow(QMainWindow):
         self._refresh_after_sheet_structure_change()
         self.update_status(f"已整表复制到{'左' if target_side == 'left' else '右'}侧 - 请保存")
 
+    def _replace_whole_sheet(self, source_side: str) -> None:
+        """把源侧当前 Sheet 完整内容覆盖到对侧同名工作表（保留对侧原位置）。"""
+        source = self.left_sheet_data if source_side == "left" else self.right_sheet_data
+        target_side = "right" if source_side == "left" else "left"
+        target_wb = self.left_wb if target_side == "left" else self.right_wb
+        if source is None or target_wb is None:
+            self.update_status("请先在两侧加载同名工作表")
+            return
+        title = source.worksheet.title
+        if title not in target_wb.sheetnames:
+            QMessageBox.warning(self, "整表覆盖失败", f"对侧不存在同名工作表「{title}」，请使用整表复制（新增）")
+            return
+
+        button = QMessageBox.question(
+            self,
+            "整表覆盖",
+            f"确定用{'左' if source_side == 'left' else '右'}侧「{title}」的完整内容\n"
+            f"覆盖{'右' if target_side == 'right' else '左'}侧同名工作表？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if button != QMessageBox.Yes:
+            return
+
+        try:
+            target_ws = ExcelMerger.replace_sheet_in_workbook(source, target_wb)
+            target_data = ExcelLoader.extract_sheet_data(target_ws)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "整表覆盖失败", f"覆盖整表失败:\n{exc}")
+            return
+
+        if target_side == "left":
+            self.left_sheet_data = target_data
+            self.left_sheet_name = title
+        else:
+            self.right_sheet_data = target_data
+            self.right_sheet_name = title
+        self._refresh_side_sheet_combo(target_side, title)
+        self._mark_side_dirty(target_side)
+        self._refresh_after_sheet_structure_change()
+        self.update_status(f"已用{'左' if source_side == 'left' else '右'}侧内容覆盖{'右' if target_side == 'right' else '左'}侧「{title}」 - 请保存")
+
+    def _replace_whole_file(self, source_side: str) -> None:
+        """文件级替换：用源侧工作簿全部内容覆盖对侧工作簿（对侧路径不变）。"""
+        source_wb = self.left_wb if source_side == "left" else self.right_wb
+        target_side = "right" if source_side == "left" else "left"
+        target_wb = self.left_wb if target_side == "left" else self.right_wb
+        if source_wb is None or target_wb is None:
+            self.update_status("请先在两侧加载文件")
+            return
+        if source_wb is target_wb:
+            self.update_status("两侧为同一工作簿，无需替换")
+            return
+
+        source_label = "左" if source_side == "left" else "右"
+        target_label = "右" if target_side == "right" else "左"
+        target_path = self.left_path if target_side == "left" else self.right_path
+        path_hint = f"（{target_path}）" if target_path else ""
+        button = QMessageBox.question(
+            self,
+            "文件级替换",
+            f"确定用{source_label}侧文件的全部内容（含所有工作表与顺序）\n"
+            f"完整替换{target_label}侧文件{path_hint}？\n\n"
+            f"替换后{target_label}侧原有全部内容将丢失，保存后写回{target_label}侧路径。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if button != QMessageBox.Yes:
+            return
+
+        try:
+            new_wb = ExcelMerger.clone_workbook(source_wb)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "文件级替换失败", f"替换工作簿失败:\n{exc}")
+            return
+
+        # 记录替换前当前 sheet 名，替换后优先回到该 sheet
+        current_name = self.left_sheet_name or self.right_sheet_name
+        if target_side == "left":
+            self.left_wb = new_wb
+        else:
+            self.right_wb = new_wb
+        names = ExcelLoader.get_sheet_names(new_wb)
+        fallback = current_name if current_name in names else (names[0] if names else None)
+        self._refresh_side_sheet_combo(target_side, fallback)
+        if fallback:
+            self._select_sheet_by_name(target_side, fallback)
+        self._mark_side_dirty(target_side)
+        self._refresh_after_sheet_structure_change()
+        self.update_status(f"已用{source_label}侧全部内容替换{target_label}侧 - 请保存")
+
     def _delete_whole_sheet(self, side: str) -> None:
         """删除当前仅一侧存在的 Sheet，使两侧结构一致。"""
         wb = self.left_wb if side == "left" else self.right_wb
@@ -2169,6 +2380,7 @@ class MainWindow(QMainWindow):
                 menu.addAction(f"从{source_label}侧复制整表（新增）", self._ctx_copy_whole_sheet)
                 menu.addAction(f"删除{source_label}侧整表", self._ctx_delete_whole_sheet)
             menu.addSeparator()
+        menu.addAction(f"复制当前整表到{other_label}（覆盖）", self._ctx_replace_whole_sheet)
         menu.addAction(f"复制行到{other_label}（含插入/删除）", self._ctx_copy_row)
         menu.addAction(f"复制列到{other_label}（含插入/删除）", self._ctx_copy_column)
         menu.addAction(f"复制单元格到{other_label}", self._ctx_copy_single_cell)
@@ -2178,6 +2390,11 @@ class MainWindow(QMainWindow):
         menu.addAction("交换左右", self.swap_sides)
         global_pos = table.viewport().mapToGlobal(pos)
         menu.exec(global_pos)
+
+    def _ctx_replace_whole_sheet(self) -> None:
+        """右键：以触发表所在侧为源，整表覆盖对侧同名工作表。"""
+        source_side = "left" if self._ctx_table is self.left_table else "right"
+        self._replace_whole_sheet(source_side)
 
     def _ctx_copy_whole_sheet(self) -> None:
         source_side = "left" if self.left_sheet_data is not None else "right"

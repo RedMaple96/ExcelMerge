@@ -181,5 +181,39 @@ class DiffHighlightDelegateTest(unittest.TestCase):
         window.close()
 
 
+    def test_long_multiline_cell_highlights_only_changed_fragments(self):
+        """多处差异的长文本单元格：只高亮真正的差异片段，不连带中间内容。"""
+        if self.app is None:
+            self.skipTest("无可用 Qt 平台插件，跳过 GUI 冒烟测试")
+
+        lines = [f"{i}.第{i}行说明文字，含数值 {i * 7}%。" for i in range(40)]
+        left_text = "\n".join(lines)
+        right_lines = list(lines)
+        right_lines[3] = right_lines[3].replace("21%", "22%")   # 一处改字符
+        right_lines[30] = right_lines[30] + "（新增说明）"        # 一处追加文本
+        right_text = "\n".join(right_lines)
+
+        window = MainWindow()
+        for table in (window.left_table, window.right_table):
+            table.setColumnCount(1)
+            table.setRowCount(1)
+        window.left_table.setItem(0, 0, QTableWidgetItem(left_text))
+        window.right_table.setItem(0, 0, QTableWidgetItem(right_text))
+
+        window._apply_char_highlight(0, 0)
+
+        left_ranges = window.left_table.item(0, 0).data(HIGHLIGHT_RANGES_ROLE) or []
+        right_ranges = window.right_table.item(0, 0).data(HIGHLIGHT_RANGES_ROLE) or []
+        self.assertEqual(
+            "".join(left_text[s:e] for s, e in left_ranges), "1"
+        )
+        self.assertEqual(
+            "".join(right_text[s:e] for s, e in right_ranges), "2（新增说明）"
+        )
+        # 高亮面积必须远小于整段文本（旧实现会把两处差异之间的内容全部标红）
+        self.assertLess(sum(e - s for s, e in left_ranges), len(left_text) * 0.05)
+        window.close()
+
+
 if __name__ == "__main__":
     unittest.main()

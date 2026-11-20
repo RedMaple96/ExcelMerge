@@ -429,7 +429,11 @@ class BottomBar(QFrame):
     # 内部回调
     # ------------------------------------------------------------------ #
     def _on_tab_clicked(self, name: str) -> None:
-        self.set_active(name)
+        """点击标签：只发切换请求，激活态由宿主在切换成功后设置。
+
+        宿主可能因未保存确认被取消而中止切换，此时激活态应停留在原标签，
+        因此这里不做乐观高亮。
+        """
         self.sheet_activated.emit(name)
 
     def _on_tab_double_clicked(self, name: str) -> None:
@@ -493,8 +497,8 @@ class BottomBar(QFrame):
         menu.exec(btn.mapToGlobal(pos))
 
     def _activate_sheet(self, name: str) -> None:
+        """快速切换列表选中：只发切换请求，激活态由宿主设置（同标签点击）。"""
         if name and name != self._active_name:
-            self.set_active(name)
             self.sheet_activated.emit(name)
 
     # ------------------------------------------------------------------ #

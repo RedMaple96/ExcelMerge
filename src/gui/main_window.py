@@ -12,7 +12,7 @@ import math
 import os
 import shutil
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QSettings, QSize, Qt
 from PySide6.QtGui import (
@@ -670,7 +670,7 @@ class MainWindow(QMainWindow):
         # 覆盖已有侧前检查未保存修改，避免静默丢失用户已完成的合并
         existing_path = self.left_path if side == "left" else self.right_path
         if existing_path and self._dirty[side]:
-            if not self._check_unsaved_before_switch():
+            if not self._check_unsaved_before_switch((side,)):
                 return
 
         # 防重入：已有加载在途时排队，前一个完成后自动加载（不丢弃请求，
@@ -738,11 +738,15 @@ class MainWindow(QMainWindow):
         combo.blockSignals(False)
 
         self._update_file_label(side)
-        self._on_sheet_changed(side)
 
-        # 两侧均加载后，更新底部导航栏标签与红点
-        if self.left_wb and self.right_wb:
+        if self.left_wb is not None and self.right_wb is not None:
+            # 打开/替换文件：两侧对齐到同一 Sheet 后统一刷新视图
+            self._align_sheets_after_load(side)
             self._refresh_bottom_bar_sheets()
+            self._reload_pair_view()
+        else:
+            # 仅一侧就绪：先按该侧第一个 Sheet 显示
+            self._on_sheet_changed(side)
 
         self.update_status(f"已加载 {side} 侧: {os.path.basename(path)}")
 
@@ -845,15 +849,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Sheet 切换 / 表格渲染 / 比较
     # ------------------------------------------------------------------ #
-    def _check_unsaved_before_switch(self) -> bool:
+    def _check_unsaved_before_switch(
+        self, sides: Optional[Sequence[str]] = None
+    ) -> bool:
         """切换 Sheet 前检查是否有未保存的修改。
 
-        - 任一侧脏时弹询问框：保存 / 不保存 / 取消
+        sides: 本次切换会影响的侧，默认两侧。只切换单侧下拉时只检查该侧——
+        对侧 Sheet 并不会被换掉，不应因对侧存在未保存修改而打断，更不应让
+        “不保存”把对侧的改动从内存里重载丢弃。
+
+        - 任一相关侧脏时弹询问框：保存 / 不保存 / 取消
         - 保存：保存所有脏侧后从磁盘重载，确保数据一致
         - 不保存：从磁盘重载丢弃内存中的修改
         - 取消：返回 False，调用方应中止切换并恢复原选中项
         """
-        dirty_sides = [s for s in ("left", "right") if self._dirty[s]]
+        target_sides = tuple(sides) if sides else ("left", "right")
+        dirty_sides = [s for s in target_sides if self._dirty[s]]
         if not dirty_sides:
             return True
         btn = QMessageBox.question(
@@ -922,8 +933,12 @@ class MainWindow(QMainWindow):
         self._invalidate_sheet_cache(side)
 
     def _on_sheet_changed(self, side: str) -> None:
-        """下拉切换 Sheet：提取 SheetData -> 刷新表格 -> 触发比较。"""
-        if not self._check_unsaved_before_switch():
+        """下拉切换 Sheet：只切换该侧，不影响对侧（两侧可停在不同 Sheet）。
+
+        对侧只有两种时机被对齐到同一 Sheet：打开/替换文件，以及点击底部
+        标签栏（见 _align_sheets_after_load 与 _switch_to_sheet）。
+        """
+        if not self._check_unsaved_before_switch((side,)):
             # 用户取消：恢复下拉到当前 sheet
             combo = self.left_sheet_combo if side == "left" else self.right_sheet_combo
             cur = self.left_sheet_name if side == "left" else self.right_sheet_name
@@ -942,15 +957,9 @@ class MainWindow(QMainWindow):
         if not self._load_sheet_data(side, name):
             return
 
-        self._sync_other_sheet_selection(side, name)
+        self._reload_pair_view()
 
-        # 切换 Sheet 时清除旧的差异结果，避免显示错位的对齐行
-        self.diff_result = None
-        self._update_birds_eye()
-        self._refresh_tables()
-        self._run_compare()
-
-        # 同步底部导航栏激活标签
+        # 底部导航栏激活标签反映最近一次切换（可能来自任一侧）
         self.bottom_bar.set_active(name)
 
     def _invalidate_sheet_cache(self, side: str) -> None:
@@ -1022,21 +1031,58 @@ class MainWindow(QMainWindow):
             self.right_sheet_name = name
         return True
 
-    def _sync_other_sheet_selection(self, changed_side: str, name: str) -> None:
-        """切换一侧 Sheet 后，将另一侧同步到同名 Sheet（不存在则显示为空）。"""
-        other_side = "right" if changed_side == "left" else "left"
-        other_wb = self.right_wb if other_side == "right" else self.left_wb
-        if other_wb is None:
+    def _align_sheets_after_load(self, side: str) -> None:
+        """打开/替换一侧文件后，把两侧对齐到同一个 Sheet。
+
+        只有打开文件与点击底部标签栏会同步两侧；手动切换单侧下拉不再影响
+        对侧，因此对齐逻辑必须在这里显式执行。
+
+        锚点优先取新加载侧的第一个 Sheet（与历史行为一致）；对侧没有该
+        Sheet 时退回两侧共有的第一个 Sheet；两侧没有同名 Sheet 时保持原
+        行为，对侧下拉置空并按 Sheet 缺失比较。
+        """
+        if self.left_wb is None or self.right_wb is None:
             return
-        self._select_sheet_by_name(other_side, name)
+        left_names = ExcelLoader.get_sheet_names(self.left_wb)
+        right_names = ExcelLoader.get_sheet_names(self.right_wb)
+        loaded_names = left_names if side == "left" else right_names
+        if not loaded_names:
+            return
+
+        anchor = loaded_names[0]
+        right_name_set = set(right_names)
+        other_names = right_name_set if side == "left" else set(left_names)
+        if anchor not in other_names:
+            common = [n for n in left_names if n in right_name_set]
+            if common:
+                anchor = common[0]
+
+        self.left_sheet_combo.blockSignals(True)
+        self.right_sheet_combo.blockSignals(True)
+        try:
+            self._select_sheet_by_name("left", anchor)
+            self._select_sheet_by_name("right", anchor)
+        finally:
+            self.left_sheet_combo.blockSignals(False)
+            self.right_sheet_combo.blockSignals(False)
+
+        self.bottom_bar.set_active(anchor)
+
+    def _reload_pair_view(self) -> None:
+        """按当前两侧 Sheet 选择重绘表格并重新比较（不改变 Sheet 选择）。
+
+        切换 Sheet 时清除旧的差异结果，避免按过期的对齐行渲染。
+        """
+        self.diff_result = None
+        self._update_birds_eye()
+        self._refresh_tables()
+        self._run_compare()
 
     def _switch_to_sheet(self, name: str) -> None:
         """从底部标签栏切换两侧到同一 Sheet（屏蔽下拉信号避免重复比较）。"""
         if not self._check_unsaved_before_switch():
-            # 用户取消：恢复底部激活标签到当前 sheet
-            cur = self.left_sheet_name or self.right_sheet_name
-            if cur:
-                self.bottom_bar.set_active(cur)
+            # 用户取消：恢复底部激活标签到切换前的 Sheet
+            self.bottom_bar.set_active(self.bottom_bar.get_active())
             return
         self.left_sheet_combo.blockSignals(True)
         self.right_sheet_combo.blockSignals(True)
@@ -1047,10 +1093,7 @@ class MainWindow(QMainWindow):
             self.left_sheet_combo.blockSignals(False)
             self.right_sheet_combo.blockSignals(False)
 
-        self.diff_result = None
-        self._update_birds_eye()
-        self._refresh_tables()
-        self._run_compare()
+        self._reload_pair_view()
         self.bottom_bar.set_active(name)
 
     def _refresh_tables(self) -> None:
@@ -1949,7 +1992,12 @@ class MainWindow(QMainWindow):
         if self.left_wb and self.right_wb:
             diff_set = {n for n, has in self._sheet_diff_summary.items() if has}
             self.bottom_bar.update_diff_status(diff_set)
-            current = self.left_sheet_name or self.right_sheet_name
+            # 激活标签不随左右对调跳变（两侧可能停在不同 Sheet 上）
+            current = (
+                self.bottom_bar.get_active()
+                or self.left_sheet_name
+                or self.right_sheet_name
+            )
             if current:
                 self.bottom_bar.set_active(current)
 
@@ -3300,6 +3348,9 @@ class MainWindow(QMainWindow):
             if n not in all_names:
                 all_names.append(n)
 
+        # 重建前记录激活标签（两侧可停在不同 Sheet 上，激活项属于用户最近一次切换）
+        prev_active = self.bottom_bar.get_active()
+
         # 先初始化：仅一侧存在的Sheet立即标记为有差异，双侧共有的待后台计算
         self._sheet_diff_summary = {}
         initial_diff_set = set()
@@ -3313,8 +3364,11 @@ class MainWindow(QMainWindow):
 
         self.bottom_bar.set_sheets(all_names, initial_diff_set)
 
-        # 高亮当前 sheet
-        current = self.left_sheet_name or self.right_sheet_name
+        # 高亮当前 sheet：优先保持原激活标签（两侧可停在不同 Sheet 上），
+        # 否则退回左侧、再退回右侧当前 Sheet
+        current = prev_active if prev_active in all_names else (
+            self.left_sheet_name or self.right_sheet_name
+        )
         if current:
             self.bottom_bar.set_active(current)
 
@@ -3382,9 +3436,16 @@ class MainWindow(QMainWindow):
                 self._sheet_diff_summary[name] = True
 
     def _update_current_sheet_diff_status(self, result: DiffResult) -> None:
-        """比较完成后，更新当前 sheet 的红点状态。"""
+        """比较完成后，更新当前 sheet 的红点状态。
+
+        红点语义是“同名 Sheet 在两份文件中存在差异”，由后台预计算得出。两侧
+        停在不同 Sheet 时本次是跨表比较，结果不对应任何单个标签，保持预计算
+        结果不变，避免把跨表差异错记到某一个标签上。
+        """
         current = self.left_sheet_name or self.right_sheet_name
         if not current:
+            return
+        if self.left_sheet_name != self.right_sheet_name:
             return
         has_diff = result.has_differences()
         self._sheet_diff_summary[current] = has_diff

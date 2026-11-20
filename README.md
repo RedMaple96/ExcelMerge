@@ -21,7 +21,7 @@ ExcelMerge is a desktop application (macOS / Windows) for **Excel diff and merge
 - Side-by-side workbooks with independently switchable sheets (both sides sync to the same sheet only when files are loaded or a bottom tab is clicked); sheets missing on one side are also compared.
 - Smart alignment: automatic header-row detection, column alignment by name and content (order changes supported), row alignment by content or key columns (LCS + greedy).
 - Difference detection: cell value diffs, row/column insertions and deletions, character-level highlight of changed fragments only.
-- Navigation: bird's-eye views (row/column level), diff dots on sheet tabs, quick jump to next difference.
+- Navigation: bird's-eye views (row/column level), diff dots on sheet tabs, quick jump to the next difference (landing exactly on the differing cell), and one-click jump to the previous/next sheet that has differences (Ctrl+PgUp / Ctrl+PgDown).
 
 ### Merge
 

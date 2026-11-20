@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         self.show_row_numbers: bool = True
         self._sync_scroll_blocked: bool = False  # 同步滚动防递归守卫
         self._current_diff_pos: int = -1  # 差异导航游标（指向 diff_row_indices）
+        self._pending_status: str = ""  # 比较结束后要显示的状态（如 Sheet 差异定位结果）
         self._compare_worker: Optional[CompareWorker] = None  # 比较后台线程
         self._sheet_summary_worker: Optional[SheetDiffSummaryWorker] = None  # 全sheet差异预计算线程
         self._load_worker: Optional[LoadWorkbookWorker] = None  # 打开文件后台加载线程
@@ -421,6 +422,15 @@ class MainWindow(QMainWindow):
         self.tb_next_diff = self.toolbar.addAction(
             icon(QStyle.SP_ArrowDown), "下一个差异", self.next_diff
         )
+        # Sheet 级差异定位：左右箭头图标与行级差异（上下箭头）区分
+        self.tb_prev_sheet_diff = self.toolbar.addAction(
+            icon(QStyle.SP_ArrowBack), "上一个表差异", self.prev_sheet_diff
+        )
+        self.tb_prev_sheet_diff.setToolTip("跳到上一个有差异的 Sheet（Ctrl+PgUp，循环）")
+        self.tb_next_sheet_diff = self.toolbar.addAction(
+            icon(QStyle.SP_ArrowForward), "下一个表差异", self.next_sheet_diff
+        )
+        self.tb_next_sheet_diff.setToolTip("跳到下一个有差异的 Sheet（Ctrl+PgDown，循环）")
         self.toolbar.addSeparator()
         self.tb_statistics = self.toolbar.addAction(
             icon(QStyle.SP_FileDialogListView), "统计", self.show_statistics
@@ -538,6 +548,10 @@ class MainWindow(QMainWindow):
         # Cmd/Ctrl+Down 下一个差异 / Cmd/Ctrl+Up 上一个差异
         QShortcut(QKeySequence("Ctrl+Down"), self, activated=self.next_diff)
         QShortcut(QKeySequence("Ctrl+Up"), self, activated=self.prev_diff)
+        # Cmd/Ctrl+PgDown 下一个表差异 / Cmd/Ctrl+PgUp 上一个表差异
+        # 注意：QKeySequence 只认 "PgUp"/"PgDown" 拼写，"PageUp" 会解析成未知键
+        QShortcut(QKeySequence("Ctrl+PgDown"), self, activated=self.next_sheet_diff)
+        QShortcut(QKeySequence("Ctrl+PgUp"), self, activated=self.prev_sheet_diff)
 
     def _init_theme_listener(self) -> None:
         """监听系统外观变化（PySide6 6.5+），自动切换主题。"""
@@ -1078,12 +1092,15 @@ class MainWindow(QMainWindow):
         self._refresh_tables()
         self._run_compare()
 
-    def _switch_to_sheet(self, name: str) -> None:
-        """从底部标签栏切换两侧到同一 Sheet（屏蔽下拉信号避免重复比较）。"""
+    def _switch_to_sheet(self, name: str) -> bool:
+        """从底部标签栏切换两侧到同一 Sheet（屏蔽下拉信号避免重复比较）。
+
+        返回 False 表示用户取消了未保存确认，两侧选择保持不变。
+        """
         if not self._check_unsaved_before_switch():
             # 用户取消：恢复底部激活标签到切换前的 Sheet
             self.bottom_bar.set_active(self.bottom_bar.get_active())
-            return
+            return False
         self.left_sheet_combo.blockSignals(True)
         self.right_sheet_combo.blockSignals(True)
         try:
@@ -1095,6 +1112,7 @@ class MainWindow(QMainWindow):
 
         self._reload_pair_view()
         self.bottom_bar.set_active(name)
+        return True
 
     def _refresh_tables(self) -> None:
         """刷新左右表格内容。
@@ -1277,6 +1295,7 @@ class MainWindow(QMainWindow):
             self._current_diff_pos = -1
             self._update_stat_labels()
             self._render_diffs()
+            self._flush_pending_status()
             return
 
         if self.left_sheet_data is None or self.right_sheet_data is None:
@@ -1290,6 +1309,7 @@ class MainWindow(QMainWindow):
             self._update_stat_labels()
             self._render_diffs()
             self._update_current_sheet_diff_status(self.diff_result)
+            self._flush_pending_status()
             return
 
         # 若旧比较仍在运行，则让新请求并发启动；旧结果会通过 sender 校验丢弃。
@@ -1394,7 +1414,7 @@ class MainWindow(QMainWindow):
         self._set_compare_actions_enabled(True)
         self.progress_bar.hide()
         self._compare_worker = None
-        self.update_status("就绪")
+        self._flush_pending_status("就绪")
 
     def _diff_colors(self) -> dict:
         """根据当前主题返回差异配色字典。
@@ -2047,15 +2067,112 @@ class MainWindow(QMainWindow):
         self._goto_diff(indices[self._current_diff_pos], len(indices))
 
     def _goto_diff(self, target_row: int, total: int) -> None:
-        """选中并滚动两侧表格至指定对齐行，更新状态栏。"""
+        """选中并滚动两侧表格至该差异行的差异单元格，更新状态栏。"""
+        target_col = self._diff_target_col(target_row)
         for table in (self.left_table, self.right_table):
-            if 0 <= target_row < table.rowCount():
-                table.setCurrentCell(target_row, 0)
-                item = table.item(target_row, 0)
-                if item is not None:
-                    table.scrollToItem(item)
+            if not (0 <= target_row < table.rowCount()):
+                continue
+            if table.columnCount() == 0:
+                continue
+            col = min(target_col, table.columnCount() - 1)
+            table.setCurrentCell(target_row, col)
+            item = table.item(target_row, col)
+            if item is not None:
+                table.scrollToItem(item)
         pos = self._current_diff_pos + 1
         self.update_status(f"差异 {pos}/{total}")
+
+    def _diff_target_col(self, aligned_row: int) -> int:
+        """返回该差异行应定位到的列：优先该行第一个真正有差异的单元格。
+
+        - different 行：取 diff_cells 中最靠左的差异列（该对齐列两侧都有实际
+          列），落在这一列才是"具体的差异单元格"，而不是行首单元格；
+        - left_only/right_only 行（含整表缺失）：整行都是差异、没有单点差异，
+          取该侧第一个非虚拟列，避免定位到对侧的虚拟空列上。
+        """
+        if self.diff_result is None:
+            return 0
+        rows = self.diff_result.aligned_rows
+        if not (0 <= aligned_row < len(rows)):
+            return 0
+        pair = rows[aligned_row]
+        if pair.diff_cells:
+            return min(pair.diff_cells)
+        if pair.status == "left_only":
+            owner = "left"
+        elif pair.status == "right_only":
+            owner = "right"
+        else:
+            return 0
+        for c, cp in enumerate(self.diff_result.aligned_cols):
+            col_idx = cp.left_col if owner == "left" else cp.right_col
+            if col_idx is not None:
+                return c
+        return 0
+
+    def next_sheet_diff(self) -> None:
+        """定位到下一个有差异的 Sheet（按底部标签顺序循环，两侧同步切换）。"""
+        self._goto_sheet_diff(1)
+
+    def prev_sheet_diff(self) -> None:
+        """定位到上一个有差异的 Sheet（按底部标签顺序循环，两侧同步切换）。"""
+        self._goto_sheet_diff(-1)
+
+    def _goto_sheet_diff(self, step: int) -> None:
+        """在底部标签顺序上定位到相邻的有差异 Sheet，并切换两侧。
+
+        “有差异”以逐 Sheet 红点结果（_sheet_diff_summary）为准：同名 Sheet
+        内容不同、或仅一侧存在的 Sheet 都算。当前 Sheet 自身有差异时从它的
+        下一项开始找，因此连点可以逐个走遍全部差异 Sheet。
+        """
+        order = self.bottom_bar.get_sheet_names()
+        diff_names = [n for n in order if self._sheet_diff_summary.get(n)]
+        if not diff_names:
+            # 逐 Sheet 差异仍在后台预计算时不能断言“无差异”
+            if self._summary_running():
+                self.update_status("Sheet 差异计算中，请稍候...")
+            else:
+                self.update_status("无差异 Sheet")
+            return
+
+        current = (
+            self.bottom_bar.get_active()
+            or self.left_sheet_name
+            or self.right_sheet_name
+        )
+        if current in order:
+            start = order.index(current)
+            candidates = [
+                (start + step * k) % len(order) for k in range(1, len(order) + 1)
+            ]
+        else:
+            # 当前 Sheet 未知：向后从第一个表开始，向前从最后一个表开始
+            candidates = (
+                list(range(len(order)))
+                if step > 0
+                else list(range(len(order) - 1, -1, -1))
+            )
+
+        target = next(
+            order[i] for i in candidates if self._sheet_diff_summary.get(order[i])
+        )
+        pos = diff_names.index(target) + 1
+        # 切换会触发比较，状态栏随即被“比较中...”占据；这里挂起文案，
+        # 由比较结束（或缺失表同步分支）时显示，避免被覆盖
+        self._pending_status = f"Sheet 差异 {pos}/{len(diff_names)}: {target}"
+        if not self._switch_to_sheet(target):
+            self._pending_status = ""  # 用户取消切换：丢弃待显示文案
+
+    def _flush_pending_status(self, fallback: str = "") -> None:
+        """显示挂起的状态文案（如「Sheet 差异 3/7」），无挂起时用 fallback。"""
+        text, self._pending_status = self._pending_status, ""
+        if text or fallback:
+            self.update_status(text or fallback)
+
+    def _summary_running(self) -> bool:
+        """逐 Sheet 差异预计算是否仍在进行。"""
+        worker = self._sheet_summary_worker
+        return worker is not None and worker.isRunning()
 
     def show_statistics(self) -> None:
         """弹窗展示当前比较统计。"""
@@ -3230,7 +3347,9 @@ class MainWindow(QMainWindow):
             "重新比较: F5\n"
             "复制单元格: Cmd/Ctrl+C\n"
             "下一个差异: Ctrl+Down\n"
-            "上一个差异: Ctrl+Up",
+            "上一个差异: Ctrl+Up\n"
+            "下一个表差异: Ctrl+PgDown\n"
+            "上一个表差异: Ctrl+PgUp",
         )
 
     # ------------------------------------------------------------------ #

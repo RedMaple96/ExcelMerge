@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
 [![openpyxl](https://img.shields.io/badge/openpyxl-3.1%2B-217346?style=for-the-badge)](https://openpyxl.readthedocs.io/)
-[![版本](https://img.shields.io/badge/version-1.0.4-blue?style=for-the-badge)](./CHANGELOG.md)
+[![版本](https://img.shields.io/badge/version-1.0.5-blue?style=for-the-badge)](./CHANGELOG.md)
 
 ExcelMerge 是一个面向 **Excel 差异比对与合并** 场景的桌面应用（macOS / Windows），适用于加载两个 `.xlsx` 文件、识别行列与单元格级差异、执行覆盖或追加合并，并以可视化方式辅助人工确认。
 
@@ -174,4 +174,4 @@ python -m unittest discover -s tests
 
 ## 更新日志
 
-见 [CHANGELOG.md](./CHANGELOG.md)，当前版本 `v1.0.4`（2026-08-27）。
+见 [CHANGELOG.md](./CHANGELOG.md)，当前版本 `v1.0.5`（2026-11-20）。

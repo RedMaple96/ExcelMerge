@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.5] - 2026-11-20
+
+### Added
+
+- 新增 Sheet 级差异定位：工具栏“上一个表差异 / 下一个表差异”（Ctrl+PgUp / Ctrl+PgDown），按底部标签顺序在所有“有差异的 Sheet”之间循环跳转，两侧同步切换，状态栏显示 `Sheet 差异 n/m`；逐 Sheet 差异仍在后台预计算时提示“Sheet 差异计算中”，不误报无差异。
+
+### Changed
+
+- 两侧 Sheet 支持独立切换：手动切换任一侧下拉不再把对侧强制同步到同名 Sheet，可以做跨表比较；只在打开/替换文件与点击底部标签栏时两侧对齐到同一个 Sheet。
+- 行级差异定位精确到单元格：上一个/下一个差异落在该行第一个真正有差异的单元格，不再停在行首；整行独占（仅左/仅右，含整表缺失）时落在该侧第一个非虚拟列。
+- 未保存修改确认按受影响侧收窄：只切换单侧 Sheet 时不再被对侧未保存修改打断，也不会把对侧改动重载丢弃。
+- 底部标签激活态改由主窗口在切换成功后设置，取消切换时高亮正确回退。
+
+### Fixed
+
+- 修复跨表比较结果被错记到单个 Sheet 标签红点的问题。
+
 ## [1.0.4] - 2026-08-27
 
 ### Added
@@ -64,3 +81,4 @@ and this project follows [Semantic Versioning](https://semver.org/).
 [1.0.2]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.2
 [1.0.4]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.4
 [1.0.3]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.3
+[1.0.5]: https://github.com/RedMaple96/ExcelMerge/releases/tag/v1.0.5

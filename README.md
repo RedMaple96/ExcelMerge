@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
 [![openpyxl](https://img.shields.io/badge/openpyxl-3.1%2B-217346?style=for-the-badge)](https://openpyxl.readthedocs.io/)
-[![Version](https://img.shields.io/badge/version-1.0.4-blue?style=for-the-badge)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.5-blue?style=for-the-badge)](./CHANGELOG.md)
 
 ExcelMerge is a desktop application (macOS / Windows) for **Excel diff and merge**: load two `.xlsx` workbooks, identify row/column/cell-level differences, apply overwrite or append merges, and confirm results visually.
 
@@ -175,4 +175,4 @@ Covers comparator, merger, loader, char diff, sheet matching, bottom bar, highli
 
 ## Changelog
 
-See [CHANGELOG.md](./CHANGELOG.md). Current version: `v1.0.4` (2026-08-27).
+See [CHANGELOG.md](./CHANGELOG.md). Current version: `v1.0.5` (2026-11-20).
